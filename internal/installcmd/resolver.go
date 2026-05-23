@@ -194,6 +194,8 @@ func uvInstallHint(profile system.PlatformProfile) string {
 		return "sudo pacman -S --noconfirm uv"
 	case "dnf":
 		return "sudo dnf install -y uv"
+	case "pkg":
+		return "pkg install -y uv"
 	case "rpm-ostree":
 		return "rpm-ostree install -y --apply-live uv (or see https://docs.astral.sh/uv/getting-started/installation/)"
 	case "winget":
@@ -228,6 +230,8 @@ func (profileResolver) ResolveDependencyInstall(profile system.PlatformProfile, 
 		return CommandSequence{{"sudo", "pacman", "-S", "--noconfirm", dependency}}, nil
 	case "dnf":
 		return CommandSequence{{"sudo", "dnf", "install", "-y", dependency}}, nil
+	case "pkg":
+		return CommandSequence{{"pkg", "install", "-y", dependency}}, nil
 	case "rpm-ostree":
 		return CommandSequence{{"rpm-ostree", "install", "-y", "--apply-live", dependency}}, nil
 	case "winget":
@@ -264,6 +268,8 @@ func resolveOpenCodeInstall(profile system.PlatformProfile) (CommandSequence, er
 		return CommandSequence{
 			{"brew", "install", "anomalyco/tap/opencode"},
 		}, nil
+	case "pkg":
+		return CommandSequence{{"npm", "install", "-g", "--ignore-scripts", pkg}}, nil
 	case "winget":
 		// On Windows, npm global installs do not require sudo.
 		return CommandSequence{{"npm", "install", "-g", "--ignore-scripts", pkg}}, nil
@@ -295,6 +301,13 @@ func resolveGGAInstall(profile system.PlatformProfile) (CommandSequence, error) 
 		return CommandSequence{
 			{"brew", "tap", "Gentleman-Programming/homebrew-tap"},
 			{"brew", "reinstall", "gga"},
+		}, nil
+	case "pkg":
+		const tmpDir = "/data/data/com.termux/files/usr/tmp/gentleman-guardian-angel"
+		return CommandSequence{
+			{"rm", "-rf", tmpDir},
+			{"git", "clone", "https://github.com/Gentleman-Programming/gentleman-guardian-angel.git", tmpDir},
+			{"bash", tmpDir + "/install.sh"},
 		}, nil
 	case "winget":
 		// On Windows, use Git Bash explicitly to avoid bare "bash" resolving to

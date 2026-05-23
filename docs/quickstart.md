@@ -31,6 +31,12 @@
 - `git` available.
 - If Node.js is missing, `gentle-ai install` prints this install hint: NodeSource LTS setup + `dnf install -y nodejs` (npm comes bundled).
 
+### Android (Termux)
+
+- `pkg` available (standard in Termux).
+- No `sudo` required (Termux runs in user space).
+- `git` available.
+
 ### All platforms
 
 - Git 2.38+.
@@ -125,7 +131,7 @@ Use `--dry-run` first to validate selections and execution plan without applying
 go run ./cmd/gentle-ai install
 ```
 
-The installer detects your platform automatically — no flags needed to select macOS vs Linux. Install commands are resolved through the appropriate package manager (brew, apt, pacman, or dnf) based on detection.
+The installer detects your platform automatically — no flags needed to select macOS vs Linux. Install commands are resolved through the appropriate package manager (brew, apt, pacman, dnf, or pkg) based on detection.
 
 After completion, verify that agent configs and selected components were installed to their expected paths.
 
@@ -175,4 +181,4 @@ Optional wrapper tools for extra defense:
 If you run the installer on an unsupported OS or Linux distro, it exits immediately with an error:
 
 - `unsupported operating system: only macOS, Linux, and Windows are supported (detected <os>)`
-- `unsupported linux distro: Linux support is limited to Ubuntu/Debian, Arch, and Fedora/RHEL family (detected <distro>)`
+- `unsupported linux distro: Linux support is limited to Ubuntu/Debian, Arch, Fedora/RHEL family, and Termux (detected <distro>)`

@@ -70,6 +70,14 @@ func TestInstallHintNodeFedora(t *testing.T) {
 	}
 }
 
+func TestInstallHintNodeTermux(t *testing.T) {
+	profile := PlatformProfile{OS: "linux", PackageManager: "pkg", LinuxDistro: LinuxDistroTermux}
+	hint := installHintNode(profile)
+	if hint != "pkg install -y nodejs" {
+		t.Fatalf("installHintNode(termux) = %q", hint)
+	}
+}
+
 func TestInstallHintNodeSilverblue(t *testing.T) {
 	profile := PlatformProfile{OS: "linux", PackageManager: "rpm-ostree", LinuxDistro: LinuxDistroFedora}
 	hint := installHintNode(profile)
@@ -164,6 +172,28 @@ func TestInstallCommandsForDepNodeFedoraHasTwoSteps(t *testing.T) {
 	}
 	if cmds[1][0] != "sudo" || cmds[1][1] != "dnf" || cmds[1][4] != "nodejs" {
 		t.Fatalf("node fedora step 2 = %v, want sudo dnf install -y nodejs", cmds[1])
+	}
+}
+
+func TestInstallCommandsForDepGitTermux(t *testing.T) {
+	profile := PlatformProfile{OS: "linux", PackageManager: "pkg", LinuxDistro: LinuxDistroTermux}
+	cmds := InstallCommandsForDep("git", profile)
+	if len(cmds) != 1 {
+		t.Fatalf("git termux commands = %d, want 1", len(cmds))
+	}
+	if cmds[0][0] != "pkg" || cmds[0][1] != "install" || cmds[0][3] != "git" {
+		t.Fatalf("git termux command = %v, want pkg install -y git", cmds[0])
+	}
+}
+
+func TestInstallCommandsForDepNodeTermux(t *testing.T) {
+	profile := PlatformProfile{OS: "linux", PackageManager: "pkg", LinuxDistro: LinuxDistroTermux}
+	cmds := InstallCommandsForDep("node", profile)
+	if len(cmds) != 1 {
+		t.Fatalf("node termux commands = %d, want 1", len(cmds))
+	}
+	if cmds[0][0] != "pkg" || cmds[0][1] != "install" || cmds[0][3] != "nodejs" {
+		t.Fatalf("node termux command = %v, want pkg install -y nodejs", cmds[0])
 	}
 }
 

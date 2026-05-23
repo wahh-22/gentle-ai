@@ -31,6 +31,7 @@ const (
 	LinuxDistroDebian  = "debian"
 	LinuxDistroArch    = "arch"
 	LinuxDistroFedora  = "fedora"
+	LinuxDistroTermux  = "termux"
 )
 
 // linuxPackageManagers is the ordered list of package managers gentle-ai
@@ -83,7 +84,7 @@ type DetectionResult struct {
 }
 
 func IsSupportedOS(goos string) bool {
-	return goos == "darwin" || goos == "linux" || goos == "windows"
+	return goos == "darwin" || goos == "linux" || goos == "windows" || goos == "android"
 }
 
 func Detect(ctx context.Context) (DetectionResult, error) {
@@ -111,6 +112,10 @@ func Detect(ctx context.Context) (DetectionResult, error) {
 // detectNpmWritable checks if npm's global prefix is under the user's home
 // directory (nvm, fnm, volta, etc.), meaning sudo is not needed for global installs.
 func detectNpmWritable(homeDir string) bool {
+	if isTermuxEnvironment() {
+		return true
+	}
+
 	out, err := exec.Command("npm", "config", "get", "prefix").Output()
 	if err != nil {
 		return false
@@ -170,6 +175,13 @@ func resolvePlatformProfile(goos, linuxOSRelease string, tools map[string]ToolSt
 		profile.Supported = true
 		return profile
 	case "linux":
+		if strings.TrimSpace(linuxOSRelease) == "" && isTermuxEnvironment() {
+			profile.LinuxDistro = LinuxDistroTermux
+			profile.PackageManager = "pkg"
+			profile.Supported = true
+			return profile
+		}
+
 		// The distro is reported, never gated on. It is what the machine
 		// calls itself, for humans reading logs and error messages.
 		profile.LinuxDistro = osReleaseID(linuxOSRelease)
@@ -205,10 +217,36 @@ func resolvePlatformProfile(goos, linuxOSRelease string, tools map[string]ToolSt
 		profile.PackageManager = "winget"
 		profile.Supported = true
 		return profile
+	case "android":
+		if isTermuxEnvironment() {
+			profile.LinuxDistro = LinuxDistroTermux
+			profile.PackageManager = "pkg"
+			profile.Supported = true
+			return profile
+		}
+		profile.Supported = false
+		return profile
 	default:
 		profile.Supported = false
 		return profile
 	}
+}
+
+func isTermuxEnvironment() bool {
+	prefix := strings.ToLower(strings.TrimSpace(os.Getenv("PREFIX")))
+	if strings.Contains(prefix, "com.termux") {
+		return true
+	}
+
+	if strings.TrimSpace(os.Getenv("TERMUX_VERSION")) != "" {
+		return true
+	}
+
+	if strings.TrimSpace(os.Getenv("TERMUX_APP_PID")) != "" {
+		return true
+	}
+
+	return false
 }
 
 // osReleaseID returns the lower-cased ID field of an /etc/os-release file, or
