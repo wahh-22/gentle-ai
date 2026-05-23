@@ -18,6 +18,12 @@ func TestEnsureSupportedOSAllowsWindows(t *testing.T) {
 	}
 }
 
+func TestEnsureSupportedOSAllowsAndroid(t *testing.T) {
+	if err := EnsureSupportedOS("android"); err != nil {
+		t.Fatalf("expected no error for Android, got %v", err)
+	}
+}
+
 func TestEnsureSupportedOSRejectsUnsupported(t *testing.T) {
 	err := EnsureSupportedOS("freebsd")
 	if err == nil {
@@ -28,7 +34,7 @@ func TestEnsureSupportedOSRejectsUnsupported(t *testing.T) {
 		t.Fatalf("expected ErrUnsupportedOS, got %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "only macOS, Linux, and Windows are supported") {
+	if !strings.Contains(err.Error(), "only macOS, Linux, Windows, and Android (Termux) are supported") {
 		t.Fatalf("expected explicit OS support message, got %q", err.Error())
 	}
 }

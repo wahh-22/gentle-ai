@@ -15,6 +15,8 @@ func installHintGit(profile PlatformProfile) string {
 		return "sudo pacman -S --noconfirm git"
 	case profile.PackageManager == "dnf":
 		return "sudo dnf install -y git"
+	case profile.PackageManager == "pkg":
+		return "pkg install -y git"
 	case profile.PackageManager == "rpm-ostree":
 		return "rpm-ostree install -y --apply-live git"
 	default:
@@ -35,6 +37,8 @@ func installHintCurl(profile PlatformProfile) string {
 		return "sudo pacman -S --noconfirm curl"
 	case profile.PackageManager == "dnf":
 		return "sudo dnf install -y curl"
+	case profile.PackageManager == "pkg":
+		return "pkg install -y curl"
 	case profile.PackageManager == "rpm-ostree":
 		return "rpm-ostree install -y --apply-live curl"
 	default:
@@ -55,6 +59,8 @@ func installHintNode(profile PlatformProfile) string {
 		return "sudo pacman -S --noconfirm nodejs npm"
 	case profile.PackageManager == "dnf":
 		return "curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash - && sudo dnf install -y nodejs"
+	case profile.PackageManager == "pkg":
+		return "pkg install -y nodejs"
 	case profile.PackageManager == "rpm-ostree":
 		return "rpm-ostree install -y --apply-live nodejs npm"
 	default:
@@ -86,6 +92,8 @@ func installHintGo(profile PlatformProfile) string {
 		return "sudo pacman -S --noconfirm go"
 	case profile.PackageManager == "dnf":
 		return "sudo dnf install -y golang"
+	case profile.PackageManager == "pkg":
+		return "pkg install -y golang"
 	case profile.PackageManager == "rpm-ostree":
 		return "rpm-ostree install -y --apply-live golang"
 	default:
@@ -148,6 +156,8 @@ func installCommandsGit(profile PlatformProfile) [][]string {
 		return [][]string{{"sudo", "pacman", "-S", "--noconfirm", "git"}}
 	case profile.PackageManager == "dnf":
 		return [][]string{{"sudo", "dnf", "install", "-y", "git"}}
+	case profile.PackageManager == "pkg":
+		return [][]string{{"pkg", "install", "-y", "git"}}
 	case profile.PackageManager == "rpm-ostree":
 		return [][]string{{"rpm-ostree", "install", "-y", "--apply-live", "git"}}
 	default:
@@ -168,6 +178,8 @@ func installCommandsCurl(profile PlatformProfile) [][]string {
 		return [][]string{{"sudo", "pacman", "-S", "--noconfirm", "curl"}}
 	case profile.PackageManager == "dnf":
 		return [][]string{{"sudo", "dnf", "install", "-y", "curl"}}
+	case profile.PackageManager == "pkg":
+		return [][]string{{"pkg", "install", "-y", "curl"}}
 	case profile.PackageManager == "rpm-ostree":
 		return [][]string{{"rpm-ostree", "install", "-y", "--apply-live", "curl"}}
 	default:
@@ -195,6 +207,8 @@ func installCommandsNode(profile PlatformProfile) [][]string {
 			{"bash", "-c", "curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -"},
 			{"sudo", "dnf", "install", "-y", "nodejs"},
 		}
+	case profile.PackageManager == "pkg":
+		return [][]string{{"pkg", "install", "-y", "nodejs"}}
 	case profile.PackageManager == "rpm-ostree":
 		return [][]string{
 			{"rpm-ostree", "install", "-y", "--apply-live", "nodejs", "npm"},
@@ -225,6 +239,8 @@ func installCommandsGo(profile PlatformProfile) [][]string {
 		return [][]string{{"sudo", "pacman", "-S", "--noconfirm", "go"}}
 	case profile.PackageManager == "dnf":
 		return [][]string{{"sudo", "dnf", "install", "-y", "golang"}}
+	case profile.PackageManager == "pkg":
+		return [][]string{{"pkg", "install", "-y", "golang"}}
 	case profile.PackageManager == "rpm-ostree":
 		return [][]string{{"rpm-ostree", "install", "-y", "--apply-live", "golang"}}
 	default:

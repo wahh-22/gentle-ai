@@ -136,6 +136,12 @@ detect_platform() {
         *)              fatal "Unsupported architecture: $uname_arch. Only amd64 and arm64 are supported." ;;
     esac
 
+    TERMUX_ENV="false"
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -n "${TERMUX_APP_PID:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
+        TERMUX_ENV="true"
+        OS_LABEL="Termux"
+    fi
+
     success "Platform: ${OS_LABEL} (${OS}/${ARCH})"
 }
 
@@ -205,6 +211,12 @@ detect_install_method() {
     fi
 
     step "Detecting best install method"
+
+    if [ "${TERMUX_ENV:-false}" = "true" ]; then
+        INSTALL_METHOD="go"
+        info "Termux detected — will install via go install"
+        return
+    fi
 
     # Priority: brew > binary > go
     # Brew handles upgrades natively and is instant.
@@ -337,6 +349,13 @@ resolve_module_path() {
 
 install_go() {
     step "Installing via go install"
+
+    if ! command -v go &>/dev/null; then
+        if [ "${TERMUX_ENV:-false}" = "true" ]; then
+            fatal "Go is required on Termux. Install it first with: pkg install -y golang"
+        fi
+        fatal "Go was not found in PATH. Install Go and retry."
+    fi
 
     # Lowercase the owner portably: ${var,,} needs bash 4+, but macOS ships
     # bash 3.2, so piping `| bash` would fail with "bad substitution". Kept

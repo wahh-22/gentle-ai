@@ -10,6 +10,7 @@
 | Linux (Ubuntu/Debian) | apt | Supported |
 | Linux (Arch) | pacman | Supported |
 | Linux (Fedora/RHEL family) | dnf | Supported |
+| Android (Termux) | pkg | Supported |
 | Linux (Fedora Silverblue) | rpm-ostree | Supported |
 | Windows 10/11 | `go install` (Go toolchain) | Supported (binary distribution held) |
 
