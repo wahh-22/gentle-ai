@@ -76,6 +76,7 @@ var (
 	cmdLookPath                  = exec.LookPath
 	streamCommandOutput          = true
 	goEnv                        = defaultGoEnv
+	detectDependencies           = system.DetectDependencies
 	installCommunityTool         = communitytool.Install
 	installCommunityToolWithHome = communitytool.InstallWithHome
 	injectInstallPersona         = persona.Inject
@@ -2118,7 +2119,7 @@ func (s componentApplyStep) Run() error {
 
 		attemptedSlugs := make(map[string]struct{}, len(adapters))
 		for _, adapter := range adapters {
-			if willAttemptSetup && engram.ShouldAttemptSetup(setupMode, adapter.Agent()) {
+			if willAttemptSetup && shouldAttemptEngramSetup(s.profile, setupMode, adapter.Agent()) {
 				slug, _ := engram.SetupAgentSlug(adapter.Agent())
 				if _, seen := attemptedSlugs[slug]; !seen {
 					setupArgs := []string{"setup", slug}
@@ -2377,6 +2378,13 @@ func RenderInstallManualActions(result InstallResult) string {
 		return ""
 	}
 	return "\nManual actions required:\n- " + strings.Join(actions, "\n- ") + "\n"
+}
+
+func shouldAttemptEngramSetup(profile system.PlatformProfile, mode engram.SetupMode, agent model.AgentID) bool {
+	if profile.PackageManager == "pkg" && agent == model.AgentClaudeCode {
+		return false
+	}
+	return engram.ShouldAttemptSetup(mode, agent)
 }
 
 // ResolveInstallProfile returns the platform profile from detection, defaulting to darwin/brew.
@@ -3414,6 +3422,8 @@ type checkDependenciesStep struct {
 	selection model.Selection
 }
 
+var checkDependenciesTimeout = 15 * time.Second
+
 func (s checkDependenciesStep) ID() string {
 	return s.id
 }
@@ -3424,7 +3434,9 @@ func (s checkDependenciesStep) Run() error {
 	// output corrupts the display (see issue #2). Missing deps are
 	// surfaced on the TUI complete screen and by the actual install steps
 	// failing with real error messages.
-	_ = system.DetectDependencies(context.Background(), s.profile)
+	ctx, cancel := context.WithTimeout(context.Background(), checkDependenciesTimeout)
+	defer cancel()
+	_ = detectDependencies(ctx, s.profile)
 	for _, agent := range s.selection.Agents {
 		// Only Pi executes package commands (its already-present `pi`
 		// subcommands and npm-based Engram initialization — see
