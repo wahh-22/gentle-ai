@@ -111,6 +111,31 @@ func TestSelfUpdate_SkipWhenDevVersion(t *testing.T) {
 	}
 }
 
+func TestSelfUpdate_SkipWhenGoPseudoVersion(t *testing.T) {
+	unsetEnv(t, envNoSelfUpdate)
+	unsetEnv(t, envSelfUpdateDone)
+
+	stubs := swapSelfUpdateDeps(t, []update.UpdateResult{
+		{
+			Tool:             update.ToolInfo{Name: "gentle-ai"},
+			InstalledVersion: "0.0.0-20260613213546-d4a08be76500",
+			LatestVersion:    "1.40.2",
+			Status:           update.UpdateAvailable,
+		},
+	}, upgrade.UpgradeReport{})
+
+	err := selfUpdate(context.Background(), "0.0.0-20260613213546-d4a08be76500", stubProfile(), io.Discard)
+	if err != nil {
+		t.Fatalf("selfUpdate returned error: %v", err)
+	}
+	if stubs.checkCalled != 0 {
+		t.Errorf("expected no check call for pseudo-version, got %d", stubs.checkCalled)
+	}
+	if stubs.upgradeCalled != 0 {
+		t.Errorf("expected no upgrade call for pseudo-version, got %d", stubs.upgradeCalled)
+	}
+}
+
 func TestSelfUpdate_SkipWhenOptOut(t *testing.T) {
 	setEnv(t, envNoSelfUpdate, "1")
 	unsetEnv(t, envSelfUpdateDone)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -51,6 +52,8 @@ var selfUpdateYesFn = func() bool {
 // Returns true if the user confirms, false to skip.
 var promptFn = defaultPromptForUpdate
 
+var releaseVersionRegexp = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
+
 // defaultPromptForUpdate prints the version delta and reads a Y/n answer from stdin.
 // Default answer is Y (Enter = accept). If stdin is not a TTY, it auto-declines so
 // scripts and CI are never blocked. Uses isattyFn for testability.
@@ -80,7 +83,7 @@ const selfUpdateTimeout = 7 * time.Second
 // Guard evaluation order (per spec):
 //  1. GENTLE_AI_SELF_UPDATE_DONE=1 → skip (loop guard)
 //  2. GENTLE_AI_NO_SELF_UPDATE=1 → skip (opt-out)
-//  3. version == "dev" → skip (dev build)
+//  3. version is not a release semver → skip (dev/source build)
 //  4. Proceed with update check
 func selfUpdate(ctx context.Context, version string, profile system.PlatformProfile, stdout io.Writer) error {
 	// Guard 1: loop prevention — already updated this invocation.
@@ -93,8 +96,10 @@ func selfUpdate(ctx context.Context, version string, profile system.PlatformProf
 		return nil
 	}
 
-	// Guard 3: dev build — no meaningful version to compare.
-	if version == "dev" {
+	// Guard 3: dev/source builds have no safe relationship to official releases.
+	// Go pseudo-versions from local forks look like 0.0.0-yyyymmdd-hash; letting
+	// those self-update would replace the fork with the upstream release binary.
+	if !isReleaseVersion(version) {
 		return nil
 	}
 
@@ -192,6 +197,10 @@ func selfUpdate(ctx context.Context, version string, profile system.PlatformProf
 	}
 
 	return restartAfterGentleAIUpgrade(target.LatestVersion, stdout)
+}
+
+func isReleaseVersion(version string) bool {
+	return releaseVersionRegexp.MatchString(strings.TrimSpace(version))
 }
 
 func gentleAIUpgradeSucceeded(report upgrade.UpgradeReport) (string, bool) {

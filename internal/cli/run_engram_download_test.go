@@ -685,6 +685,81 @@ func TestRunInstallBetaEngramUsesMainGoInstallAndInstalledBinary(t *testing.T) {
 	}
 }
 
+func TestRunInstallTermuxEngramSkipsClaudeSetup(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+	restoreHome := osUserHomeDir
+	restoreCommand := runCommand
+	restoreLookPath := cmdLookPath
+	t.Cleanup(func() {
+		osUserHomeDir = restoreHome
+		runCommand = restoreCommand
+		cmdLookPath = restoreLookPath
+	})
+
+	osUserHomeDir = func() (string, error) { return home, nil }
+	opencodeDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(opencodeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(opencodeDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "opencode.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(opencode.json) error = %v", err)
+	}
+	cmdLookPath = func(name string) (string, error) {
+		switch name {
+		case "engram", "opencode", "claude":
+			return filepath.Join(home, "bin", name), nil
+		default:
+			return missingBinaryLookPath(name)
+		}
+	}
+	recorder := &commandRecorder{}
+	runCommand = recorder.record
+
+	detection := system.DetectionResult{
+		System: system.SystemInfo{
+			OS:        "android",
+			Arch:      "arm64",
+			Shell:     "/data/data/com.termux/files/usr/bin/bash",
+			Supported: true,
+			Profile: system.PlatformProfile{
+				OS:             "android",
+				LinuxDistro:    system.LinuxDistroTermux,
+				PackageManager: "pkg",
+				Supported:      true,
+			},
+		},
+	}
+
+	_, err := RunInstall(
+		[]string{"--scope", "workspace", "--agents", string(model.AgentOpenCode) + "," + string(model.AgentClaudeCode), "--component", "engram"},
+		detection,
+	)
+	if err != nil {
+		t.Fatalf("RunInstall() error = %v", err)
+	}
+
+	commands := recorder.get()
+	foundOpenCodeSetup := false
+	for _, cmd := range commands {
+		if strings.Contains(cmd, "setup opencode") {
+			foundOpenCodeSetup = true
+		}
+		if strings.Contains(cmd, "setup claude-code") {
+			t.Fatalf("Termux install must skip hanging claude-code engram setup, got commands: %v", commands)
+		}
+	}
+	if !foundOpenCodeSetup {
+		t.Fatalf("expected opencode engram setup to still run, got commands: %v", commands)
+	}
+
+	claudeMCPPath := filepath.Join(workspace, ".claude", "mcp", "engram.json")
+	if _, err := os.Stat(claudeMCPPath); err != nil {
+		t.Fatalf("expected Claude Code direct engram injection at %s: %v", claudeMCPPath, err)
+	}
+}
+
 // Make sure the engram package's DownloadLatestBinary is accessible.
 var _ = engram.DownloadLatestBinary
 

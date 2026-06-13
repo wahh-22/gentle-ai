@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v3/internal/installcmd"
 	"github.com/gentleman-programming/gentle-ai/v3/internal/model"
@@ -65,6 +67,37 @@ func TestCheckDependenciesStepDoesNotRequireUVForOtherAgents(t *testing.T) {
 
 	if err := step.Run(); err != nil {
 		t.Fatalf("checkDependenciesStep.Run() unexpected error = %v", err)
+	}
+}
+
+func TestCheckDependenciesStepBoundsDependencyDetection(t *testing.T) {
+	origDetectDependencies := detectDependencies
+	origTimeout := checkDependenciesTimeout
+	t.Cleanup(func() {
+		detectDependencies = origDetectDependencies
+		checkDependenciesTimeout = origTimeout
+	})
+
+	checkDependenciesTimeout = 10 * time.Millisecond
+	detectDependencies = func(ctx context.Context, _ system.PlatformProfile) system.DependencyReport {
+		<-ctx.Done()
+		return system.DependencyReport{}
+	}
+
+	step := checkDependenciesStep{
+		id:      "prepare:check-dependencies",
+		profile: system.PlatformProfile{OS: "android", PackageManager: "pkg", Supported: true},
+		selection: model.Selection{
+			Agents: []model.AgentID{model.AgentOpenCode},
+		},
+	}
+
+	start := time.Now()
+	if err := step.Run(); err != nil {
+		t.Fatalf("checkDependenciesStep.Run() unexpected error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("checkDependenciesStep.Run() took %s, expected bounded dependency detection", elapsed)
 	}
 }
 
