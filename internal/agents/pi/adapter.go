@@ -20,6 +20,7 @@ import (
 const (
 	piMCPAdapterPackage         = "npm:pi-mcp-adapter"
 	piMCPAdapterPackageSpec     = "npm:pi-mcp-adapter"
+	piEngramPackage             = "npm:gentle-engram"
 	piMCPAdapterDependency      = "pi-mcp-adapter"
 	piMCPAdapterVersion         = "2.6.0"
 	piMCPAdapterVersionRange    = "^2.6.0"
@@ -244,8 +245,6 @@ func (a *Adapter) SupportsAutoInstall() bool {
 func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, error) {
 	return [][]string{
 		{"pi", "install", "npm:gentle-pi"},
-		{"pi", "install", "npm:gentle-engram"},
-		{"pi", "install", "npm:pi-mcp-adapter"},
 		a.engramInitCommand(),
 		piSubagentsInstallCommand(profile),
 		{"pi", "install", "npm:@juicesharp/rpiv-ask-user-question"},
@@ -257,7 +256,7 @@ func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, er
 
 func (a *Adapter) engramInitCommand() []string {
 	if _, err := a.lookPath("pnpm"); err == nil {
-		return []string{"pnpm", "dlx", "gentle-engram@latest", "pi-engram", "init"}
+		return []string{"pnpm", "dlx", "gentle-engram@latest", "init"}
 	}
 	return []string{"npm", "exec", "--yes", "--package", "gentle-engram@latest", "--", "pi-engram", "init"}
 }
@@ -369,7 +368,7 @@ func mergePiSettingsFile(path string) (filemerge.WriteResult, error) {
 		return filemerge.WriteResult{}, err
 	}
 
-	settings["packages"] = appendPiPackage(settings["packages"], piMCPAdapterPackageSpec)
+	settings["packages"] = appendPiPackage(dedupePiEngramPackages(settings["packages"]), piMCPAdapterPackageSpec)
 
 	encoded, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -410,6 +409,25 @@ func appendPiPackage(existing any, desired string) []any {
 	return append(filtered, desired)
 }
 
+func dedupePiEngramPackages(existing any) []any {
+	packages := piPackagesAsSlice(existing)
+	filtered := make([]any, 0, len(packages))
+	var selected any
+	for _, pkg := range packages {
+		if piPackageIdentity(pkg) != piEngramPackage {
+			filtered = append(filtered, pkg)
+			continue
+		}
+		if selected == nil || strings.HasPrefix(piPackageSource(pkg), piEngramPackage+"@") {
+			selected = pkg
+		}
+	}
+	if selected != nil {
+		filtered = append(filtered, selected)
+	}
+	return filtered
+}
+
 func piPackagesAsSlice(existing any) []any {
 	switch value := existing.(type) {
 	case []any:
@@ -437,22 +455,30 @@ func piPackagesAsSlice(existing any) []any {
 }
 
 func piPackageIdentity(pkg any) string {
-	source, ok := pkg.(string)
-	if !ok {
-		object, isObject := pkg.(map[string]any)
-		if !isObject {
-			return ""
-		}
-		source, _ = object["source"].(string)
-	}
+	source := piPackageSource(pkg)
 	if strings.HasPrefix(source, piMCPAdapterPackage+"@") || source == piMCPAdapterPackage {
 		return piMCPAdapterPackage
+	}
+	if strings.HasPrefix(source, piEngramPackage+"@") || source == piEngramPackage {
+		return piEngramPackage
 	}
 	for legacy := range legacyPiSubagentPackageIdentities {
 		if source == legacy || strings.HasPrefix(source, legacy+"@") {
 			return legacy
 		}
 	}
+	return source
+}
+
+func piPackageSource(pkg any) string {
+	if source, ok := pkg.(string); ok {
+		return source
+	}
+	object, ok := pkg.(map[string]any)
+	if !ok {
+		return ""
+	}
+	source, _ := object["source"].(string)
 	return source
 }
 

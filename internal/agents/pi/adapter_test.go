@@ -272,8 +272,6 @@ func TestAdapterInstallCommandSequenceUsesNpmWhenPnpmIsUnavailable(t *testing.T)
 
 	want := [][]string{
 		{"pi", "install", "npm:gentle-pi"},
-		{"pi", "install", "npm:gentle-engram"},
-		{"pi", "install", "npm:pi-mcp-adapter"},
 		{"npm", "exec", "--yes", "--package", "gentle-engram@latest", "--", "pi-engram", "init"},
 		piSubagentsInstallCommand(system.PlatformProfile{}),
 		{"pi", "install", "npm:@juicesharp/rpiv-ask-user-question"},
@@ -302,8 +300,8 @@ func TestAdapterInstallCommandSequenceUsesSameSubagentsPackageForWindows(t *test
 	}
 
 	want := []string{"pi", "install", "npm:pi-subagents-j0k3r"}
-	if !reflect.DeepEqual(commands[4], want) {
-		t.Fatalf("InstallCommand()[4] = %#v, want %#v", commands[4], want)
+	if !reflect.DeepEqual(commands[2], want) {
+		t.Fatalf("InstallCommand()[2] = %#v, want %#v", commands[2], want)
 	}
 }
 
@@ -322,9 +320,9 @@ func TestAdapterInstallCommandSequenceUsesPnpmForEngramInitWhenAvailable(t *test
 		t.Fatalf("InstallCommand() error = %v", err)
 	}
 
-	want := []string{"pnpm", "dlx", "gentle-engram@latest", "pi-engram", "init"}
-	if !reflect.DeepEqual(commands[3], want) {
-		t.Fatalf("InstallCommand()[3] = %#v, want %#v", commands[3], want)
+	want := []string{"pnpm", "dlx", "gentle-engram@latest", "init"}
+	if !reflect.DeepEqual(commands[1], want) {
+		t.Fatalf("InstallCommand()[1] = %#v, want %#v", commands[1], want)
 	}
 }
 
@@ -373,5 +371,35 @@ func TestMergePiSettingsFileRemovesLegacySubagentPackages(t *testing.T) {
 	}
 	if !reflect.DeepEqual(settings.Packages, []string{"npm:pi-subagents-j0k3r", "npm:other@1.0.0", "npm:pi-mcp-adapter"}) {
 		t.Fatalf("packages = %#v", settings.Packages)
+	}
+}
+
+func TestMergePiSettingsFileKeepsSingleVersionedGentleEngramPackage(t *testing.T) {
+	home := t.TempDir()
+	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"packages":["npm:gentle-engram","npm:other","npm:gentle-engram@0.1.8"]}`
+	if err := os.WriteFile(settingsPath, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mergePiSettingsFile(settingsPath); err != nil {
+		t.Fatalf("mergePiSettingsFile() error = %v", err)
+	}
+
+	var settings struct {
+		Packages []string `json:"packages"`
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(settings.Packages, []string{"npm:other", "npm:gentle-engram@0.1.8", "npm:pi-mcp-adapter"}) {
+		t.Fatalf("packages = %v, want one versioned gentle-engram source", settings.Packages)
 	}
 }
