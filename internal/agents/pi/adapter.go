@@ -256,7 +256,7 @@ func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, er
 
 func (a *Adapter) engramInitCommand() []string {
 	if _, err := a.lookPath("pnpm"); err == nil {
-		return []string{"pnpm", "dlx", "gentle-engram@latest", "init"}
+		return []string{"pnpm", "--config.auto-install-peers=false", "--reporter=append-only", "dlx", "gentle-engram@latest", "init"}
 	}
 	return []string{"npm", "exec", "--yes", "--package", "gentle-engram@latest", "--", "pi-engram", "init"}
 }

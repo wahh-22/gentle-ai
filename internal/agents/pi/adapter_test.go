@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -320,9 +321,17 @@ func TestAdapterInstallCommandSequenceUsesPnpmForEngramInitWhenAvailable(t *test
 		t.Fatalf("InstallCommand() error = %v", err)
 	}
 
-	want := []string{"pnpm", "dlx", "gentle-engram@latest", "init"}
+	want := []string{"pnpm", "--config.auto-install-peers=false", "--reporter=append-only", "dlx", "gentle-engram@latest", "init"}
 	if !reflect.DeepEqual(commands[1], want) {
 		t.Fatalf("InstallCommand()[1] = %#v, want %#v", commands[1], want)
+	}
+	configIndex := slices.Index(commands[1], "--config.auto-install-peers=false")
+	dlxIndex := slices.Index(commands[1], "dlx")
+	if configIndex < 0 || dlxIndex < 0 || configIndex >= dlxIndex {
+		t.Fatalf("pnpm config flag must precede dlx; got %#v", commands[1])
+	}
+	if !slices.Contains(commands[1], "--reporter=append-only") {
+		t.Fatalf("pnpm command missing append-only reporter; got %#v", commands[1])
 	}
 }
 
