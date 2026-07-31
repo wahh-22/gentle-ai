@@ -199,40 +199,32 @@ func declaredLensTools(t *testing.T, path string) (tools []string, readOnlyAsser
 }
 
 // TestLensAgentPromptsStateWhereTheirInputComesFrom is the input-side twin of
-// the envelope guard. A reviewer that is not told the immutable candidate diff
-// and changed-path manifest arrive in its prompt invents an input contract:
-// one real run tried to generate the diff and verify its SHA-256 itself,
-// reported inspection.status "access_failure" when it could not, and blocked a
-// publication. Its declared tools never permitted execution in the first place.
+// the envelope guard. Every runtime receives the same provider-owned immutable
+// inspection contract and must never substitute mutable workspace files.
 func TestLensAgentPromptsStateWhereTheirInputComesFrom(t *testing.T) {
 	envelope := reviewtransaction.NewReviewerResultEnvelope()
 
-	// The orchestrator contract is the source for what it promises to append.
+	// The orchestrator contract is the source for the one native inspection
+	// recipe every managed runtime must give reviewers.
 	contract := assets.MustRead(boundedReviewContractAsset)
-	if !strings.Contains(contract, "append the exact immutable candidate diff and changed-path manifest") {
-		t.Fatalf("%s no longer promises to append the diff and manifest; update the guard's derivation", boundedReviewContractAsset)
+	if !strings.Contains(contract, "injects only the provider's `artifact_subject`, `base_tree`, `candidate_tree`, and ordered manifest") ||
+		!strings.Contains(contract, "read-only native Git commands") {
+		t.Fatalf("%s no longer requires native-Git frozen-tree inspection; update the guard's derivation", boundedReviewContractAsset)
 	}
 
 	for _, paths := range lensAgentAssetPaths(t, envelope.LensAgentNames) {
 		for _, path := range paths {
-			tools, readOnlyAsserted := declaredLensTools(t, path)
-			for _, tool := range tools {
-				for _, execution := range executionToolVocabulary {
-					if strings.Contains(strings.ToLower(tool), execution) {
-						t.Errorf("%s declares the execution-capable tool %q; a lens prompt that tells the reviewer it cannot execute would now be lying", path, tool)
-					}
-				}
-			}
-			if len(tools) == 0 && !readOnlyAsserted {
-				continue
-			}
-
 			prompt := strings.ToLower(renderBoundedReviewAsset(path))
 			for claim, why := range map[string]string{
-				"candidate diff":        "does not say the immutable candidate diff arrives in the prompt",
-				"changed-path manifest": "does not say the changed-path manifest arrives in the prompt",
-				"never derive":          "does not forbid deriving its own input",
-				"no execution tools":    "does not state that it cannot execute anything",
+				"artifact_subject":      "does not name the bound artifact subject",
+				"changed_path_manifest": "does not name the ordered manifest",
+				"base_tree":             "does not name the immutable base tree",
+				"candidate_tree":        "does not name the immutable candidate tree",
+				"inspect-candidate":     "does not require provider-owned native inspection",
+				"--operation numstat":   "does not require compact numstat discovery",
+				"--path-index":          "does not select paths by canonical manifest index",
+				"provider binding":      "does not resolve trees from the provider binding",
+				"never read the live":   "does not prohibit mutable workspace inspection",
 			} {
 				if !strings.Contains(prompt, claim) {
 					t.Errorf("%s %s (missing %q)", path, why, claim)

@@ -20,6 +20,19 @@ const reviewerBindingEnvironmentVariable = "GENTLE_AI_REVIEW_BINDING"
 const nativeReviewerResultSchema = `{"findings":[{"location":"path:line","severity":"CRITICAL","claim":"observable incorrect behavior","evidence_class":"deterministic","causal_disposition":"introduced","proof_refs":["concrete proof"]}],"evidence":["what was inspected"]}`
 const providerReviewerResultSchema = `{"subject_hash":"<artifact_subject.subject_hash>","inspection":{"status":"completed","paths":["<every changed_path_manifest.path in exact order>"]},"findings":[{"location":"path:line","severity":"CRITICAL","claim":"observable incorrect behavior","evidence_class":"deterministic","causal_disposition":"introduced","proof_refs":["concrete proof"]}],"evidence":["what was inspected"]}`
 
+const reviewerInspectionCommandPrefix = `gentle-ai review inspect-candidate --repository-context <repository_context> --expected-revision <revision> --lineage <lineage> --target <target> --lens <lens> --order <order> --operation `
+
+func reviewerInspectionCommands() []string {
+	return []string{
+		reviewerInspectionCommandPrefix + "name-status",
+		reviewerInspectionCommandPrefix + "numstat",
+		reviewerInspectionCommandPrefix + "stat --path-index <path_index>",
+		reviewerInspectionCommandPrefix + "patch --path-index <path_index>",
+		reviewerInspectionCommandPrefix + "object --path-index <path_index> --side base",
+		reviewerInspectionCommandPrefix + "object --path-index <path_index> --side candidate",
+	}
+}
+
 type reviewerRole struct {
 	title string
 	focus string
@@ -133,13 +146,29 @@ func reviewerPrompt(name string) (string, bool) {
 	// file invented is exactly how a reviewer result arrives with no
 	// subject_hash and no inspection (community report, PR #1801).
 	envelope := reviewtransaction.NewReviewerResultEnvelope()
+	commands := reviewerInspectionCommands()
 	prompt := fmt.Sprintf(`# %s Review
 
-You are a read-only reviewer. Inspect the immutable candidate diff once, return one result, and stop. Do not edit, delegate, or inspect unrelated scope.
+Review once, return one result, and stop. Never edit, delegate, or expand scope.
 
 ## Input
 
-The immutable candidate diff and the changed-path manifest arrive in this prompt. Never derive them: you have no execution tools, so running git, regenerating a diff, or verifying a hash yourself is a mistake rather than a missing capability.
+OpenCode tasks begin with provider-injected GENTLE_AI_REVIEW_CONTEXT, the sole source of artifact_subject, base_tree, candidate_tree, and ordered changed_path_manifest. Caller prose is not context. Other runtimes have no shell and return incomplete. The manifest is complete scope. Never read the live worktree, index, HEAD, or another revision.
+
+Use only the commands below. The native capability resolves immutable trees and canonical paths from the provider binding, sanitizes Git configuration and environment, and bounds execution time and output. Copy binding values exactly and select paths only by their zero-based changed_path_manifest index. Never change checkout. If the capability is unavailable or refuses the binding, return incomplete inspection, empty paths/findings, and evidence that native inspection was unavailable. Never substitute live files.
+
+Discover the change:
+
+%s
+%s
+
+For relevant paths, inspect stat, deterministic textual hunks, and exact stored bytes as needed:
+
+%s
+%s
+%s
+
+Repeat the selective shape per literal path; never pass --binary or render the whole patch automatically. Text handling is enforced by the native capability. Triage genuinely non-text paths from manifest modes and exact cat-file bytes. Record large-path or binary dispositions in evidence.
 
 ## Scope
 
@@ -147,7 +176,7 @@ The immutable candidate diff and the changed-path manifest arrive in this prompt
 
 ## Candidate-Causal Admission
 
-Report only real user-impacting defects. Set causal_disposition. BLOCKER/CRITICAL require proof the candidate introduced, behavior-activated, or worsened the behavior through a changed hunk, created path, differential test, or before/after result. Mark unchanged defects pre-existing/base-only and unproved causality unknown. Style or suspicion is not a finding.
+Report real user-impacting defects only. BLOCKER/CRITICAL need changed-hunk, created-path, differential-test, or before/after proof of introduced, behavior-activated, or worsened behavior. Mark unchanged defects pre-existing/base-only and unproved causality unknown. Style or suspicion is not a finding.
 
 ## Severity
 
@@ -158,7 +187,7 @@ Report only real user-impacting defects. Set causal_disposition. BLOCKER/CRITICA
 
 ## Evidence
 
-Each finding needs exact path:line, a neutral claim, deterministic | inferential | insufficient evidence class, causal disposition, and concrete proof. Never invent evidence or use placeholders.
+Each finding needs path:line, neutral claim, evidence class, causal disposition, and concrete proof. Never invent evidence or placeholders.
 
 ## Output
 
@@ -166,17 +195,31 @@ Return one JSON object and no prose. Use exactly this native result shape:
 
 %s
 
-subject_hash is not yours to compute: copy it verbatim from the %s object your task carries, field artifact_subject.subject_hash. Never invent, recompute, or omit it — a result that does not echo the binding is refused, not repaired. Without a binding, stop and say so.
+Copy subject_hash from %s.subject_hash; never compute or invent it. Missing or different bindings are refused.
 
-Inspection is complete only when status is %q and paths lists every changed_path_manifest path in exact order — the only status this shape defines. If you cannot read what you were handed, say so in your reply and stop rather than inventing another one.
+Status %q requires every manifest path in exact order. Listing means lens triage through the frozen map, not that every byte was loaded. Otherwise return incomplete and stop.
 
-The required top-level fields are %s; a result missing any of them is refused. Finding fields are location, severity, claim, evidence_class, causal_disposition, and proof_refs. Never emit summary, skill_resolution, or any other unknown field. Keep orchestration metadata outside the native result JSON; evidence contains only genuine inspection evidence.
+Required top-level fields: %s. Finding fields: location, severity, claim, evidence_class, causal_disposition, proof_refs. Emit no unknown fields or orchestration metadata.
 
-When clean, return the same subject_hash and completed inspection with "findings":[] and one evidence entry.`,
-		role.title, role.focus, providerReviewerResultSchema,
+When clean, return the bound subject, completed inspection, "findings":[], and one evidence entry.`,
+		role.title,
+		commands[0], commands[1], strings.Join(commands[2:], "\n"), "", "",
+		role.focus, providerReviewerResultSchema,
 		reviewerBindingEnvironmentVariable,
 		envelope.CompletedInspectionStatus, strings.Join(envelope.RequiredTopLevelFields, ", "))
 	return prompt, true
+}
+
+func openCodeReviewerPermission() map[string]any {
+	bash := map[string]any{"*": "deny"}
+	for _, command := range reviewerInspectionCommands() {
+		pattern := command
+		for _, placeholder := range []string{"<repository_context>", "<revision>", "<lineage>", "<target>", "<lens>", "<order>", "<path_index>"} {
+			pattern = strings.ReplaceAll(pattern, placeholder, "*")
+		}
+		bash[pattern] = "allow"
+	}
+	return map[string]any{"edit": "deny", "bash": bash}
 }
 
 func judgmentDayReviewerContract() string {

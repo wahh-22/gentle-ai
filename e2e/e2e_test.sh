@@ -252,7 +252,7 @@ test_preset_full_with_custom_persona_excludes_persona() {
 test_preset_full_components() {
     log_test "Preset full-gentleman includes core and optional Gentleman components"
 
-    output=$($BINARY install --preset full-gentleman --agent claude-code --dry-run 2>&1) || true
+    output=$($BINARY install --preset full-gentleman --agent claude-code --agent opencode --dry-run 2>&1) || true
 
     local components_line
     components_line=$(echo "$output" | grep "Components order:")
@@ -265,8 +265,8 @@ test_preset_full_components() {
     assert_output_contains "$components_line" "permissions" "Full includes permissions"
     assert_output_contains "$components_line" "gga" "Full includes gga"
     assert_output_contains "$components_line" "claude-theme" "Full includes Claude Gentleman theme"
-    assert_output_not_contains "$components_line" "\(^\|,\)theme\(,\|$\)" "Full excludes legacy OpenCode theme"
-    assert_output_not_contains "$components_line" "opencode-gentle-logo" "Full excludes OpenCode Gentle logo"
+    assert_output_contains "$components_line" "theme" "Full includes OpenCode Gentleman theme"
+    assert_output_contains "$components_line" "opencode-gentle-logo" "Full includes OpenCode Gentle logo"
 }
 
 test_dry_run_full_preset_persona_before_sdd() {
@@ -305,21 +305,25 @@ test_dry_run_full_preset_persona_before_sdd() {
     fi
 }
 
-test_preset_no_legacy_theme_in_any_preset() {
-    log_test "Presets exclude the unsafe generic theme component"
+test_preset_theme_inventory() {
+    log_test "Only full-gentleman includes the managed OpenCode theme component"
 
     local full_order_str=""
     for preset in minimal ecosystem-only full-gentleman; do
-        output=$($BINARY install --preset "$preset" --agent claude-code --dry-run 2>&1) || true
+        output=$($BINARY install --preset "$preset" --agent claude-code --agent opencode --dry-run 2>&1) || true
         local components_line
         components_line=$(echo "$output" | grep "Components order:")
         local order_str
         order_str=${components_line#*Components order:}
         order_str=${order_str# }
-        if echo "$order_str" | tr ',' '\n' | grep -qx "theme"; then
-            log_fail "Preset '$preset' unexpectedly includes unsafe generic theme component"
+        if [ "$preset" = "full-gentleman" ] && echo "$order_str" | tr ',' '\n' | grep -qx "theme"; then
+            log_pass "Preset '$preset' includes managed OpenCode theme component"
+        elif [ "$preset" = "full-gentleman" ]; then
+            log_fail "Preset '$preset' must include managed OpenCode theme component"
+        elif echo "$order_str" | tr ',' '\n' | grep -qx "theme"; then
+            log_fail "Preset '$preset' unexpectedly includes managed OpenCode theme component"
         else
-            log_pass "Preset '$preset' excludes unsafe generic theme component"
+            log_pass "Preset '$preset' excludes managed OpenCode theme component"
         fi
         if [ "$preset" = "full-gentleman" ]; then
             full_order_str=$order_str
@@ -494,11 +498,13 @@ test_cc_engram_injection() {
     cleanup_test_env
 
     if $BINARY install --agent claude-code --component engram --persona neutral 2>&1; then
-        # MCP config
-        assert_file_exists "$HOME/.claude/mcp/engram.json" "engram.json MCP config"
-        assert_file_contains "$HOME/.claude/mcp/engram.json" '"command"' "engram.json has 'command' key"
-        assert_file_contains "$HOME/.claude/mcp/engram.json" 'engram' "engram.json command points to engram binary (absolute or relative)"
-        assert_valid_json "$HOME/.claude/mcp/engram.json" "engram.json is valid JSON"
+        # User-scope MCP registry
+        local registry="$HOME/.claude.json"
+        assert_file_exists "$registry" "Claude user MCP registry"
+        assert_file_contains "$registry" '"mcpServers"' "Registry has mcpServers"
+        assert_file_contains "$registry" '"engram"' "Registry has Engram server"
+        assert_valid_json "$registry" "Claude user MCP registry is valid JSON"
+        assert_file_not_exists "$HOME/.claude/mcp/engram.json" "legacy Engram MCP file is not written"
 
         # CLAUDE.md section
         assert_file_exists "$HOME/.claude/CLAUDE.md" "CLAUDE.md exists"
@@ -607,8 +613,11 @@ test_cc_persona_custom_does_nothing() {
     cleanup_test_env
 
     if $BINARY install --agent claude-code --component persona --persona custom 2>&1; then
-        # Custom persona should NOT create CLAUDE.md (persona does nothing).
-        assert_file_not_exists "$HOME/.claude/CLAUDE.md" "CLAUDE.md not created by custom persona"
+        # CLAUDE.md may exist: routing guidance is scheduled per agent and
+        # deliberately outside the component loop, so every configured agent
+        # receives it. What `--persona custom` promises is that no personality
+        # is imposed, so assert that instead of the file's absence.
+        assert_file_not_contains "$HOME/.claude/CLAUDE.md" "Senior Architect\|Rioplatense\|voseo" "CLAUDE.md carries no tone content under custom"
         # No output-style file either.
         assert_file_not_exists "$HOME/.claude/output-styles/gentleman.md" "No output-style for custom"
     else
@@ -782,16 +791,19 @@ test_cc_custom_sdd_plus_skills() {
 }
 
 test_cc_context7_injection() {
-    log_test "Claude Code: context7 injection (settings.json MCP servers)"
+    log_test "Claude Code: context7 injection (~/.claude.json user MCP registry)"
     cleanup_test_env
 
     if $BINARY install --agent claude-code --component context7 --persona neutral 2>&1; then
-        local settings="$HOME/.claude/settings.json"
-        assert_file_exists "$settings" "Claude settings.json"
-        assert_file_contains "$settings" '"mcpServers"' "settings.json has mcpServers key"
-        assert_file_contains "$settings" '"context7"' "settings.json has context7 server"
-        assert_file_contains "$settings" 'context7-mcp' "settings.json points to context7-mcp"
-        assert_valid_json "$settings" "settings.json is valid JSON"
+        # Claude Code only reads user-scope MCP servers from ~/.claude.json;
+        # the settings.json mcpServers block earlier versions wrote is inert
+        # and no longer written (issue #1868, PR #1909).
+        local registry="$HOME/.claude.json"
+        assert_file_exists "$registry" "Claude user MCP registry (~/.claude.json)"
+        assert_file_contains "$registry" '"mcpServers"' "user registry has mcpServers key"
+        assert_file_contains "$registry" '"context7"' "user registry has context7 server"
+        assert_file_contains "$registry" 'context7-mcp' "user registry points to context7-mcp"
+        assert_valid_json "$registry" "user registry is valid JSON"
         assert_file_not_exists "$HOME/.claude/mcp/context7.json" "legacy context7 MCP file is not written"
     else
         log_fail "context7 install command failed"
@@ -821,7 +833,7 @@ test_cc_theme_injection() {
         local settings="$HOME/.claude/settings.json"
         assert_file_exists "$settings" "Claude settings.json"
         assert_file_contains "$settings" '"theme"' "Has theme key"
-        assert_file_contains "$settings" 'gentleman-kanagawa' "Has gentleman-kanagawa theme"
+        assert_file_contains "$settings" 'gentleman' "Has gentleman theme"
         assert_valid_json "$settings" "settings.json is valid JSON"
     else
         log_fail "theme install command failed"
@@ -1030,13 +1042,14 @@ test_oc_theme_injection() {
 
     if $BINARY install --agent opencode --component theme --persona neutral 2>&1; then
         local tui="$HOME/.config/opencode/tui.json"
-        local theme_file="$HOME/.config/opencode/themes/gentleman-kanagawa.json"
+        local theme_file="$HOME/.config/opencode/themes/gentleman-midnight.json"
         assert_file_exists "$tui" "OpenCode tui.json"
         assert_file_contains "$tui" '"theme"' "Has theme key"
-        assert_file_contains "$tui" 'gentleman-kanagawa' "Has gentleman-kanagawa theme"
+        assert_file_contains "$tui" 'gentleman-midnight' "Has gentleman-midnight theme"
         assert_valid_json "$tui" "tui.json is valid JSON"
         assert_file_exists "$theme_file" "OpenCode Gentleman theme file"
         assert_valid_json "$theme_file" "theme file is valid JSON"
+        assert_file_not_exists "$HOME/.config/opencode/opencode.json" "OpenCode theme does not write opencode.json"
     else
         log_fail "OpenCode theme install command failed"
     fi
@@ -1072,10 +1085,14 @@ test_full_preset_claude_code() {
         assert_file_contains "$settings" '"theme"' "Has theme"
         assert_valid_json "$settings" "settings.json is valid JSON"
 
-        # MCP config is merged into Claude settings.json.
-        assert_file_contains "$settings" '"mcpServers"' "Has MCP servers"
-        assert_file_contains "$settings" '"context7"' "Has context7 MCP"
-        assert_file_contains "$settings" 'context7-mcp' "Context7 MCP uses pinned package"
+        # MCP registration lives in the ~/.claude.json user registry, the only
+        # user-scope file Claude Code reads MCP servers from (issue #1868).
+        local registry="$HOME/.claude.json"
+        assert_file_exists "$registry" "Claude user MCP registry (~/.claude.json)"
+        assert_file_contains "$registry" '"mcpServers"' "Has MCP servers"
+        assert_file_contains "$registry" '"context7"' "Has context7 MCP"
+        assert_file_contains "$registry" 'context7-mcp' "Context7 MCP uses pinned package"
+        assert_valid_json "$registry" "user registry is valid JSON"
 
         # Skills
         assert_file_count_min "$HOME/.claude/skills" "SKILL.md" 11 "At least 11 skill files"
@@ -1093,7 +1110,7 @@ test_full_preset_opencode() {
     if $BINARY install --agent opencode --component engram --component sdd --component persona --component skills --component context7 --component permissions --component theme --preset full-gentleman --persona gentleman 2>&1; then
         local settings="$HOME/.config/opencode/opencode.json"
         local tui="$HOME/.config/opencode/tui.json"
-        local theme_file="$HOME/.config/opencode/themes/gentleman-kanagawa.json"
+        local theme_file="$HOME/.config/opencode/themes/gentleman-midnight.json"
         local agents_md="$HOME/.config/opencode/AGENTS.md"
 
         # opencode.json should have JSON overlays; theme lives in tui.json + themes/
@@ -1105,7 +1122,7 @@ test_full_preset_opencode() {
 
         assert_file_exists "$tui" "OpenCode tui.json exists"
         assert_file_contains "$tui" '"theme"' "tui.json has theme"
-        assert_file_contains "$tui" 'gentleman-kanagawa' "tui.json has gentleman-kanagawa"
+        assert_file_contains "$tui" 'gentleman-midnight' "tui.json has gentleman-midnight"
         assert_valid_json "$tui" "tui.json is valid JSON"
         assert_file_exists "$theme_file" "OpenCode Gentleman theme file exists"
         assert_valid_json "$theme_file" "OpenCode theme file is valid JSON"
@@ -1194,7 +1211,7 @@ test_ecosystem_both_agents() {
         # Claude Code
         assert_file_exists "$HOME/.claude/CLAUDE.md" "Claude CLAUDE.md"
         assert_file_contains "$HOME/.claude/CLAUDE.md" "gentle-ai:sdd-orchestrator" "Claude has SDD"
-        assert_file_contains "$HOME/.claude/settings.json" '"context7"' "Claude context7 MCP"
+        assert_file_contains "$HOME/.claude.json" '"context7"' "Claude context7 MCP"
         assert_file_count_min "$HOME/.claude/skills" "SKILL.md" 11 "Claude skills"
 
         # OpenCode
@@ -1385,10 +1402,10 @@ test_idempotent_engram_claude() {
     if [ -f "$claude_md" ]; then
         assert_no_duplicate_section "$claude_md" "engram-protocol" "No duplicate engram section after 2 runs"
 
-        # Also check MCP JSON is identical
-        local mcp_file="$HOME/.claude/mcp/engram.json"
+        # Also check the user registry remains valid.
+        local mcp_file="$HOME/.claude.json"
         if [ -f "$mcp_file" ]; then
-            assert_valid_json "$mcp_file" "engram.json still valid after 2 runs"
+            assert_valid_json "$mcp_file" "Claude user MCP registry still valid after 2 runs"
         fi
     else
         log_fail "CLAUDE.md not found"
@@ -1490,13 +1507,13 @@ test_idempotent_theme_opencode() {
     local first_tui_hash
     local first_theme_hash
     first_tui_hash=$(md5sum "$HOME/.config/opencode/tui.json" 2>/dev/null | cut -d' ' -f1)
-    first_theme_hash=$(md5sum "$HOME/.config/opencode/themes/gentleman-kanagawa.json" 2>/dev/null | cut -d' ' -f1)
+    first_theme_hash=$(md5sum "$HOME/.config/opencode/themes/gentleman-midnight.json" 2>/dev/null | cut -d' ' -f1)
 
     $BINARY install --agent opencode --component theme --persona neutral 2>&1 || true
     local second_tui_hash
     local second_theme_hash
     second_tui_hash=$(md5sum "$HOME/.config/opencode/tui.json" 2>/dev/null | cut -d' ' -f1)
-    second_theme_hash=$(md5sum "$HOME/.config/opencode/themes/gentleman-kanagawa.json" 2>/dev/null | cut -d' ' -f1)
+    second_theme_hash=$(md5sum "$HOME/.config/opencode/themes/gentleman-midnight.json" 2>/dev/null | cut -d' ' -f1)
 
     if [ "$first_tui_hash" = "$second_tui_hash" ] && [ -n "$first_tui_hash" ] && [ "$first_theme_hash" = "$second_theme_hash" ] && [ -n "$first_theme_hash" ]; then
         log_pass "Idempotent: same theme config after two runs"
@@ -1540,16 +1557,26 @@ test_idempotent_full_claude() {
 
 # --- Category 8: Edge cases ---
 
-test_edge_theme_not_in_presets() {
-    log_test "Edge case: --component theme (not in any preset)"
+test_edge_theme_component_is_independent() {
+    log_test "Edge case: --component theme installs independently"
     cleanup_test_env
 
     if $BINARY install --agent claude-code --component theme --persona neutral 2>&1; then
         assert_file_exists "$HOME/.claude/settings.json" "Theme creates settings.json"
         assert_file_contains "$HOME/.claude/settings.json" '"theme"' "Theme key present"
-        # No other components should be created
+        # No other component should be created. CLAUDE.md itself is not proof
+        # of one: routing guidance is scheduled per agent, outside the
+        # component loop, so every configured agent gets it. What proves no
+        # component ran is that agent-routing is the ONLY managed section in
+        # the file.
         if [ -f "$HOME/.claude/CLAUDE.md" ]; then
-            log_fail "Theme-only install should NOT create CLAUDE.md"
+            local sections
+            sections=$(grep -o '<!-- gentle-ai:[a-z-]* -->' "$HOME/.claude/CLAUDE.md" | sort -u | tr '\n' ' ')
+            if [ "$(printf '%s' "$sections" | xargs)" = "<!-- gentle-ai:agent-routing -->" ]; then
+                log_pass "Theme-only: CLAUDE.md carries routing guidance and no component section"
+            else
+                log_fail "Theme-only install wrote component sections: $sections"
+            fi
         else
             log_pass "Theme-only: no CLAUDE.md (correct)"
         fi
@@ -1564,7 +1591,7 @@ test_edge_multiple_agents_same_component() {
 
     if $BINARY install --agent claude-code --agent opencode --component context7 --persona neutral 2>&1; then
         # Both agents should have context7
-        assert_file_contains "$HOME/.claude/settings.json" '"context7"' "Claude context7"
+        assert_file_contains "$HOME/.claude.json" '"context7"' "Claude context7"
         assert_file_contains "$HOME/.config/opencode/opencode.json" '"context7"' "OpenCode context7"
     else
         log_fail "Multiple agents + context7 install command failed"
@@ -1645,13 +1672,13 @@ test_edge_multiple_json_overlays() {
 
     local settings="$HOME/.config/opencode/opencode.json"
     local tui="$HOME/.config/opencode/tui.json"
-    local theme_file="$HOME/.config/opencode/themes/gentleman-kanagawa.json"
+    local theme_file="$HOME/.config/opencode/themes/gentleman-midnight.json"
     assert_file_contains "$settings" '"permission"' "Permission config present after 3 merges"
     assert_file_contains "$settings" '"mcp"' "MCP servers present after 3 merges"
     assert_file_contains "$settings" '"context7"' "Context7 present after 3 merges"
     assert_valid_json "$settings" "Final merged JSON is valid"
     assert_file_contains "$tui" '"theme"' "Theme present in tui.json after 3 installs"
-    assert_file_contains "$tui" 'gentleman-kanagawa' "Gentleman theme selected in tui.json"
+    assert_file_contains "$tui" 'gentleman-midnight' "Gentleman theme selected in tui.json"
     assert_valid_json "$tui" "tui.json is valid after 3 installs"
     assert_file_exists "$theme_file" "Theme file exists after 3 installs"
     assert_valid_json "$theme_file" "Theme file is valid after 3 installs"
@@ -2237,7 +2264,7 @@ test_preset_ecosystem_components
 test_preset_full_components
 test_preset_full_with_custom_persona_excludes_persona
 test_dry_run_full_preset_persona_before_sdd
-test_preset_no_legacy_theme_in_any_preset
+test_preset_theme_inventory
 test_preset_custom_no_components
 test_preset_custom_explicit_components
 
@@ -2323,7 +2350,7 @@ if [ "${RUN_FULL_E2E:-0}" = "1" ]; then
     test_codex_engram_idempotent
 
     # Category 8: Edge cases
-    test_edge_theme_not_in_presets
+    test_edge_theme_component_is_independent
     test_edge_multiple_agents_same_component
     test_edge_persona_switch
     test_edge_persona_switch_preserves_sections_opencode

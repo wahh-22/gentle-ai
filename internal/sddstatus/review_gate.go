@@ -333,7 +333,7 @@ var errTerminalReceiptMissing = errors.New("terminal review receipt is missing")
 // reviewGateDisabledUnmanagedReason names the situation before the mechanism:
 // what governs this change comes first, and the reason the gate could not
 // govern stays appended behind it so no information is destroyed.
-const reviewGateDisabledUnmanagedReason = "review-driven development is disabled, so no review governs this change; it closes under ordinary repository policy rather than under a review receipt"
+const reviewGateDisabledUnmanagedReason = "receipt-driven development is disabled, so no review governs this change; it closes under ordinary repository policy rather than under a review receipt"
 
 func applyReviewGate(
 	status *Status,
@@ -434,7 +434,7 @@ func resolveReviewAuthority(ctx context.Context, repo, receiptPath, receiptConte
 		}
 	}
 	// Escalations and validation failures block regardless of provenance: an
-	// artifact that asked review-driven development to act is validated in
+	// artifact that asked receipt-driven development to act is validated in
 	// full even while the switch is off.
 	if len(blockers) > 0 {
 		return blockers[0]
@@ -459,6 +459,11 @@ func resolveReviewAuthority(ctx context.Context, repo, receiptPath, receiptConte
 	return selected
 }
 
+func reviewReceiptCoversDeliveredContent(baseTree, finalCandidateTree string) bool {
+	// guard:population receipt-content-governance too-loose: legitimate governing receipts must cover delivered content; empty-candidate receipts are excluded
+	return baseTree != finalCandidateTree
+}
+
 func evaluateReceiptPayload(ctx context.Context, repo string, receiptPayload []byte, changeName string) reviewAuthorityEvaluation {
 	var evaluation reviewtransaction.NativeGateEvaluation
 	var compactState *reviewtransaction.CompactState
@@ -467,7 +472,7 @@ func evaluateReceiptPayload(ctx context.Context, repo string, receiptPayload []b
 		if err != nil {
 			return reviewAuthorityEvaluation{Result: reviewtransaction.GateInvalidated, Reason: fmt.Sprintf("compact review receipt is invalid or non-terminal: %v", err)}
 		}
-		if receipt.BaseTree == receipt.FinalCandidateTree {
+		if !reviewReceiptCoversDeliveredContent(receipt.BaseTree, receipt.FinalCandidateTree) {
 			return reviewAuthorityEvaluation{Result: reviewtransaction.GateScopeChanged, Reason: reviewGateEmptyReceiptReason}
 		}
 		if changeName != "" {
@@ -496,7 +501,7 @@ func evaluateReceiptPayload(ctx context.Context, repo string, receiptPayload []b
 		if err != nil {
 			return reviewAuthorityEvaluation{Result: reviewtransaction.GateInvalidated, Reason: fmt.Sprintf("review receipt is invalid or non-terminal: %v", err)}
 		}
-		if receipt.BaseTree == receipt.FinalCandidateTree {
+		if !reviewReceiptCoversDeliveredContent(receipt.BaseTree, receipt.FinalCandidateTree) {
 			return reviewAuthorityEvaluation{Result: reviewtransaction.GateScopeChanged, Reason: reviewGateEmptyReceiptReason}
 		}
 		request, err := reviewtransaction.BuildNativeGateRequest(ctx, repo, reviewtransaction.NativeGateRequestInput{

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/versions"
@@ -18,7 +19,12 @@ type InjectionResult struct {
 	Files   []string
 }
 
-func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
+// Inject registers the Context7 MCP server for the adapter. targetDir is the
+// scoped injection root (the home directory for user scope, the workspace for
+// workspace scope). Claude Code user-scope registration goes to ~/.claude.json,
+// the only user-scope file Claude Code reads MCP servers from (issue #1868);
+// workspace scope keeps the scoped settings merge.
+func Inject(homeDir, targetDir string, adapter agents.Adapter) (InjectionResult, error) {
 	if !adapter.SupportsMCP() {
 		return InjectionResult{}, nil
 	}
@@ -26,17 +32,20 @@ func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
 		if adapter.Agent() == model.AgentClaudeCode {
-			return injectMergeIntoSettings(homeDir, adapter)
+			if targetDir == homeDir {
+				return injectClaudeUserConfig(homeDir, adapter)
+			}
+			return injectMergeIntoSettings(homeDir, targetDir, adapter)
 		}
-		return injectSeparateFile(homeDir, adapter)
+		return injectSeparateFile(targetDir, adapter)
 	case model.StrategyMergeIntoSettings:
-		return injectMergeIntoSettings(homeDir, adapter)
+		return injectMergeIntoSettings(homeDir, targetDir, adapter)
 	case model.StrategyMCPConfigFile:
-		return injectMCPConfigFile(homeDir, adapter)
+		return injectMCPConfigFile(targetDir, adapter)
 	case model.StrategyTOMLFile:
-		return injectTOMLFile(homeDir, adapter)
+		return injectTOMLFile(targetDir, adapter)
 	case model.StrategyMergeIntoYAML:
-		return injectYAMLFile(homeDir, adapter)
+		return injectYAMLFile(targetDir, adapter)
 	default:
 		return InjectionResult{}, fmt.Errorf("mcp injector does not support MCP strategy %d for agent %q", adapter.MCPStrategy(), adapter.Agent())
 	}
@@ -110,46 +119,19 @@ func injectSeparateFile(homeDir string, adapter agents.Adapter) (InjectionResult
 }
 
 // injectMergeIntoSettings merges MCP servers into a config file (OpenCode opencode.json, Gemini settings.json).
-func injectMergeIntoSettings(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
-	settingsPath := adapter.SettingsPath(homeDir)
+func injectMergeIntoSettings(homeDir, targetDir string, adapter agents.Adapter) (InjectionResult, error) {
+	settingsPath := adapter.SettingsPath(targetDir)
 	if settingsPath == "" {
 		return InjectionResult{}, nil
 	}
 
 	overlay := DefaultContext7OverlayJSON()
 	if adapter.Agent() == model.AgentOpenCode || adapter.Agent() == model.AgentKilocode {
-		return injectOpenCodeMergeIntoSettings(settingsPath)
-	}
-	if adapter.Agent() == model.AgentOpenCode && isTermuxOpenPetsEnabled() {
-		instructionPath := filepath.Join(homeDir, ".config", "opencode", "OPENPETS.md")
-		instructionWrite, err := filemerge.WriteFileAtomic(instructionPath, OpenCodeOpenPetsInstructionMarkdown(), 0o644)
-		if err != nil {
-			return InjectionResult{}, err
+		instructionPath := ""
+		if adapter.Agent() == model.AgentOpenCode && targetDir == homeDir && isTermuxOpenPetsEnabled() {
+			instructionPath = filepath.Join(homeDir, ".config", "opencode", "OPENPETS.md")
 		}
-
-		overlay, err := filemerge.MergeJSONObjects(overlay, OpenCodeOpenPetsTermuxOverlayJSON())
-		if err != nil {
-			return InjectionResult{}, err
-		}
-
-		baseJSON, err := osReadFile(settingsPath)
-		if err != nil {
-			return InjectionResult{}, err
-		}
-		merged, err := filemerge.MergeJSONObjects(baseJSON, overlay)
-		if err != nil {
-			return InjectionResult{}, err
-		}
-		withInstructions, err := appendInstructionPath(merged, instructionPath)
-		if err != nil {
-			return InjectionResult{}, err
-		}
-		settingsWrite, err := filemerge.WriteFileAtomic(settingsPath, withInstructions, 0o644)
-		if err != nil {
-			return InjectionResult{}, err
-		}
-
-		return InjectionResult{Changed: settingsWrite.Changed || instructionWrite.Changed, Files: []string{settingsPath, instructionPath}}, nil
+		return injectOpenCodeMergeIntoSettings(settingsPath, instructionPath)
 	}
 	if adapter.Agent() == model.AgentOpenClaw {
 		return injectOpenClawMergeIntoSettings(settingsPath)
@@ -163,7 +145,7 @@ func injectMergeIntoSettings(homeDir string, adapter agents.Adapter) (InjectionR
 	return InjectionResult{Changed: settingsWrite.Changed, Files: []string{settingsPath}}, nil
 }
 
-func injectOpenCodeMergeIntoSettings(settingsPath string) (InjectionResult, error) {
+func injectOpenCodeMergeIntoSettings(settingsPath, instructionPath string) (InjectionResult, error) {
 	baseJSON, err := osReadFile(settingsPath)
 	if err != nil {
 		return InjectionResult{}, err
@@ -198,10 +180,33 @@ func injectOpenCodeMergeIntoSettings(settingsPath string) (InjectionResult, erro
 			}
 		}
 	}
+	if instructionPath != "" {
+		overlay, err = filemerge.MergeJSONObjects(overlay, OpenCodeOpenPetsTermuxOverlayJSON())
+		if err != nil {
+			return InjectionResult{}, err
+		}
+	}
 
 	merged, err := filemerge.MergeJSONObjects(baseJSON, overlay)
 	if err != nil {
 		return InjectionResult{}, err
+	}
+	if instructionPath != "" {
+		merged, err = appendInstructionPath(merged, instructionPath)
+		if err != nil {
+			return InjectionResult{}, err
+		}
+	}
+
+	files := []string{settingsPath}
+	changed := false
+	if instructionPath != "" {
+		instructionWrite, writeErr := filemerge.WriteFileAtomic(instructionPath, OpenCodeOpenPetsInstructionMarkdown(), 0o644)
+		if writeErr != nil {
+			return InjectionResult{}, writeErr
+		}
+		changed = instructionWrite.Changed
+		files = append(files, instructionPath)
 	}
 
 	settingsWrite, err := filemerge.WriteFileAtomic(settingsPath, merged, 0o644)
@@ -209,7 +214,7 @@ func injectOpenCodeMergeIntoSettings(settingsPath string) (InjectionResult, erro
 		return InjectionResult{}, err
 	}
 
-	return InjectionResult{Changed: settingsWrite.Changed, Files: []string{settingsPath}}, nil
+	return InjectionResult{Changed: changed || settingsWrite.Changed, Files: files}, nil
 }
 
 func injectOpenClawMergeIntoSettings(settingsPath string) (InjectionResult, error) {
@@ -277,6 +282,79 @@ func migrateOpenClawLegacyMCPServers(baseJSON []byte) ([]byte, error) {
 	}
 
 	return append(migrated, '\n'), nil
+}
+
+// injectClaudeUserConfig registers Context7 in ~/.claude.json, the only
+// user-scope location Claude Code reads MCP servers from — settings.json
+// silently ignores the top-level mcpServers key earlier versions wrote
+// (issue #1868).
+func injectClaudeUserConfig(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
+	writeResult, configPath, err := claude.MergeUserConfig(homeDir, DefaultContext7OverlayJSON())
+	if err != nil {
+		return InjectionResult{}, err
+	}
+
+	changed := writeResult.Changed
+	files := []string{configPath}
+	// Best-effort: the block is inert, so a settings.json that cannot be
+	// rewritten must not fail the injection that already succeeded above.
+	settingsPath := adapter.SettingsPath(homeDir)
+	if settingsChanged, cleanupErr := removeInertSettingsMCPServers(settingsPath); cleanupErr == nil && settingsChanged {
+		changed = true
+		files = append(files, settingsPath)
+	}
+
+	return InjectionResult{Changed: changed, Files: files}, nil
+}
+
+// removeInertSettingsMCPServers deletes the inert top-level mcpServers key
+// from settings.json once the real registration lives in ~/.claude.json —
+// but only when the block holds nothing beyond the managed context7 entry.
+// An unparsable settings file is left untouched.
+// isManagedSettingsContext7Entry reports whether the inert settings.json entry
+// matches the managed shape, so cleanup never deletes a user-authored server.
+func isManagedSettingsContext7Entry(entry any) bool {
+	server, ok := entry.(map[string]any)
+	if !ok {
+		return false
+	}
+	return server["command"] == "npx" && strings.Contains(fmt.Sprint(server["args"]), "context7-mcp")
+}
+
+func removeInertSettingsMCPServers(settingsPath string) (bool, error) {
+	if settingsPath == "" {
+		return false, nil
+	}
+	raw, err := osReadFile(settingsPath)
+	if err != nil {
+		return false, err
+	}
+	root, err := filemerge.UnmarshalJSONObject(raw)
+	if err != nil {
+		return false, nil
+	}
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	for name, entry := range servers {
+		if name != "context7" || !isManagedSettingsContext7Entry(entry) {
+			return false, nil
+		}
+	}
+	delete(root, "mcpServers")
+
+	encoded, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("marshal cleaned settings json: %w", err)
+	}
+
+	writeResult, err := filemerge.WriteFileAtomic(settingsPath, append(encoded, '\n'), 0o644)
+	if err != nil {
+		return false, err
+	}
+
+	return writeResult.Changed, nil
 }
 
 // injectMCPConfigFile writes to a dedicated mcp.json config file (Cursor pattern).

@@ -3,6 +3,8 @@ package reviewtransaction
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -353,10 +355,24 @@ func TestBuildStagedWorkspaceOverlayRecoveryUsesOnlyTheRealIndex(t *testing.T) {
 		len(snapshot.IntendedUntracked) != 0 || len(snapshot.LedgerIDs) != 0 {
 		t.Fatalf("staged recovery snapshot = %#v", snapshot)
 	}
-	for _, path := range []string{"tracked.txt", "untracked.txt"} {
-		if gitSnapshotSucceeds(repo, "cat-file", "-e", snapshot.CandidateTree+":"+path) && path == "untracked.txt" {
-			t.Fatalf("staged recovery snapshot included %s", path)
-		}
+	if got := gitSnapshot(t, repo, "show", snapshot.CandidateTree+":reviewed.txt"); got != "reviewed\n" {
+		t.Fatalf("staged recovery snapshot reviewed.txt = %q, want authorized staged bytes", got)
+	}
+	if got := gitSnapshot(t, repo, "show", snapshot.CandidateTree+":tracked.txt"); got != "base\n" {
+		t.Fatalf("staged recovery snapshot tracked.txt = %q, want base index bytes", got)
+	}
+	if gitSnapshotSucceeds(repo, "cat-file", "-e", snapshot.CandidateTree+":untracked.txt") {
+		t.Fatal("staged recovery snapshot included unrelated untracked.txt")
+	}
+
+	writeSnapshotFile(t, repo, "tracked.txt", "more unstaged\n")
+	writeSnapshotFile(t, repo, "untracked.txt", "more untracked\n")
+	rebuilt, err := builder.BuildStagedWorkspaceOverlayRecovery(context.Background(), target)
+	if err != nil {
+		t.Fatalf("rebuild staged recovery snapshot: %v", err)
+	}
+	if rebuilt.CandidateTree != snapshot.CandidateTree || rebuilt.Identity != snapshot.Identity {
+		t.Fatalf("staged recovery identity changed with only worktree bytes: before=%#v after=%#v", snapshot, rebuilt)
 	}
 	if afterIndex := gitSnapshot(t, repo, "diff", "--cached", "--binary"); afterIndex != beforeIndex {
 		t.Fatal("staged recovery snapshot mutated the real index")
@@ -577,17 +593,17 @@ func TestBaseDiffPreservesIntendedAuthorityAfterTrackedTransition(t *testing.T) 
 // pins the contract behind issue 1778: a large intended-untracked set must
 // reach `git add` without expanding one ":(literal)<path>" pathspec per file
 // into argv, because Windows caps a process command line at 32767
-// characters. 2000 paths of ~30 literal-pathspec characters each produce
-// ~60000 characters, comfortably over that limit, so any regression back to
-// per-path argv entries fails this test even on Linux.
+// characters. 600 paths of 65 literal-pathspec characters each produce 39000
+// characters before separators, comfortably over that limit, while keeping
+// the hosted-Windows Git fixture bounded.
 func TestSnapshotBuilderCurrentChangesStagesLargeIntendedUntrackedWithoutExceedingArgv(t *testing.T) {
 	requireSnapshotGit(t)
 	repo := initSnapshotRepo(t)
 
-	const count = 2000
+	const count = 600
 	intended := make([]string, count)
 	for index := 0; index < count; index++ {
-		name := fmt.Sprintf("bulk/headroom-%05d.txt", index)
+		name := fmt.Sprintf("bulk/windows-command-line-headroom-regression-%05d.txt", index)
 		writeSnapshotFile(t, repo, name, fmt.Sprintf("bulk-%05d\n", index))
 		intended[index] = name
 	}
@@ -1107,7 +1123,7 @@ func TestBaseWorkspaceOverlayPropagatesTemporaryIndexInventoryErrors(t *testing.
 
 	originalCommand := gitCommandContext
 	gitCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if slicesContain(args, "ls-files") && slicesContain(args, "--cached") && slicesContain(args, "-z") {
+		if slicesContain(args, "ls-files") && slicesContain(args, "--cached") && slicesContain(args, "-z") && !slicesContain(args, "--") {
 			return exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEmptyIndexInventoryHelperProcess$")
 		}
 		return originalCommand(ctx, name, args...)
@@ -1448,13 +1464,172 @@ func TestSnapshotRepoTemplateInitializesOnceConcurrently(t *testing.T) {
 	}
 }
 
+func TestUntrackedProofBatchedListingMatchesPerPathReference(t *testing.T) {
+	requireSnapshotGit(t)
+	repo := initSnapshotRepo(t)
+	intended := []string{"bulk/a.txt", "deep/nested/b.txt"}
+	for index := range 48 {
+		intended = append(intended, fmt.Sprintf("bulk/reference-%02d.txt", index))
+	}
+	for _, logicalPath := range intended {
+		writeSnapshotFile(t, repo, logicalPath, "reference content for "+logicalPath+"\n")
+	}
+
+	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{Kind: TargetCurrentChanges, IntendedUntracked: intended})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.New()
+	hash.Write([]byte("gentle-ai.intended-untracked/v1\x00"))
+	for _, logicalPath := range snapshot.IntendedUntracked {
+		entry, err := runGit(context.Background(), repo, nil, nil, "ls-tree", "-z", snapshot.CandidateTree, "--", literalPathspec(logicalPath))
+		if err != nil || len(entry) == 0 {
+			t.Fatalf("per-path reference for %q = %q, %v", logicalPath, entry, err)
+		}
+		writeLengthPrefixed(hash, []byte(logicalPath))
+		writeLengthPrefixed(hash, entry)
+	}
+	want := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	if snapshot.IntendedUntrackedProof != want {
+		t.Fatalf("batched proof = %s, want per-path reference %s", snapshot.IntendedUntrackedProof, want)
+	}
+}
+
+func TestSnapshotIntendedQueriesUseConstantGitInvocations(t *testing.T) {
+	requireSnapshotGit(t)
+	repo := initSnapshotRepo(t)
+	intended := make([]string, 128)
+	for index := range intended {
+		intended[index] = fmt.Sprintf("bulk/file-%03d.txt", index)
+		writeSnapshotFile(t, repo, intended[index], "candidate\n")
+	}
+
+	counts := map[string]int{}
+	originalCommand := gitCommandContext
+	gitCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 3 {
+			counts[args[3]]++
+		}
+		return originalCommand(ctx, name, args...)
+	}
+	t.Cleanup(func() { gitCommandContext = originalCommand })
+
+	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{Kind: TargetCurrentChanges, IntendedUntracked: intended})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["ls-tree"] != 1 || counts["check-ignore"] != 1 || counts["ls-files"] != 2 {
+		t.Fatalf("128-path Build git queries = ls-tree:%d check-ignore:%d ls-files:%d, want 1/1/2", counts["ls-tree"], counts["check-ignore"], counts["ls-files"])
+	}
+	counts = map[string]int{}
+	if err := (SnapshotBuilder{Repo: repo}).ValidateEvidence(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if counts["ls-tree"] != 1 {
+		t.Fatalf("128-path ValidateEvidence ls-tree invocations = %d, want 1", counts["ls-tree"])
+	}
+}
+
+func TestNulSeparatedGitParsersPreserveUnusualPaths(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	paths := []string{"space name.txt", "line\nbreak.txt", "tab\tname.txt", "--leading-dash.txt"}
+	var treeOutput, pathOutput []byte
+	for _, logicalPath := range paths {
+		record := []byte("100644 blob " + oid + "\t" + logicalPath)
+		treeOutput = append(treeOutput, record...)
+		treeOutput = append(treeOutput, 0)
+		pathOutput = append(pathOutput, logicalPath...)
+		pathOutput = append(pathOutput, 0)
+	}
+	entries, err := parseTreeEntries(treeOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathSet := nulSeparatedPathSet(pathOutput)
+	for _, logicalPath := range paths {
+		want := []byte("100644 blob " + oid + "\t" + logicalPath + "\x00")
+		if !bytes.Equal(entries[logicalPath], want) {
+			t.Fatalf("tree entry for %q = %q, want %q", logicalPath, entries[logicalPath], want)
+		}
+		if _, present := pathSet[logicalPath]; !present {
+			t.Fatalf("NUL path set lost %q", logicalPath)
+		}
+	}
+	if _, err := parseTreeEntries([]byte("malformed\x00")); err == nil {
+		t.Fatal("malformed ls-tree record was accepted")
+	}
+	unterminated := []byte("100644 blob " + oid + "\tunterminated.txt")
+	if _, err := parseTreeEntries(unterminated); err == nil {
+		t.Fatal("unterminated ls-tree record was accepted")
+	}
+}
+
+func TestBatchGitProtocolReadersRejectDiagnostics(t *testing.T) {
+	t.Setenv("GENTLE_AI_TEST_GIT_PROTOCOL_DIAGNOSTIC", "1")
+	originalCommand := gitCommandContext
+	gitCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBatchGitProtocolDiagnosticHelperProcess$")
+	}
+	t.Cleanup(func() { gitCommandContext = originalCommand })
+
+	repo := t.TempDir()
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "ls-tree", run: func() error {
+			_, err := listTreeEntries(context.Background(), repo, "HEAD")
+			return err
+		}},
+		{name: "cat-file-batch", run: func() error {
+			_, err := batchBlobContents(context.Background(), repo, []string{strings.Repeat("a", 40)})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if err == nil || !strings.Contains(err.Error(), "git inventory produced diagnostics: protocol diagnostic") {
+				t.Fatalf("protocol reader error = %v, want explicit stderr diagnostic", err)
+			}
+		})
+	}
+}
+
+func TestBatchGitProtocolDiagnosticHelperProcess(t *testing.T) {
+	if os.Getenv("GENTLE_AI_TEST_GIT_PROTOCOL_DIAGNOSTIC") != "1" {
+		return
+	}
+	_, _ = fmt.Fprint(os.Stderr, "protocol diagnostic")
+}
+
+func TestSnapshotBuilderRejectsFirstIgnoredIntendedPathInCanonicalOrder(t *testing.T) {
+	requireSnapshotGit(t)
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, ".gitignore", "ignored/\n")
+	writeSnapshotFile(t, repo, "ignored/a.txt", "a\n")
+	writeSnapshotFile(t, repo, "ignored/b.txt", "b\n")
+	_, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{
+		Kind: TargetCurrentChanges, IntendedUntracked: []string{"ignored/b.txt", "ignored/a.txt"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `intended-untracked path "ignored/a.txt" is ignored`) {
+		t.Fatalf("ignored intended error = %v, want first canonical path", err)
+	}
+}
+
 func initSnapshotRepo(t *testing.T) string {
 	t.Helper()
 	template, err := snapshotRepoTemplate()
 	if err != nil {
 		t.Fatalf("snapshot repo template: %v", err)
 	}
-	repo := t.TempDir()
+	// canonicalTempDir, not t.TempDir: every production resolver answers with
+	// the resolved spelling, so a fixture that keeps the raw one compares
+	// unequal to its own repository. On a Windows runner TEMP is reached
+	// through an 8.3 short name and the raw path says RUNNER~1 where the
+	// resolver correctly says runneradmin; on Darwin the same gap appears as
+	// /var versus /private/var.
+	repo := canonicalTempDir(t)
 	if err := os.CopyFS(repo, os.DirFS(template)); err != nil {
 		t.Fatalf("CopyFS(snapshot repo template): %v", err)
 	}
@@ -1468,7 +1643,7 @@ func snapshotRepoTemplate() (string, error) {
 			snapshotRepoTemplateErr = fmt.Errorf("create template directory: %w", err)
 			return
 		}
-		for _, args := range [][]string{{"init"}, {"config", "user.email", "snapshot@example.com"}, {"config", "user.name", "Snapshot Test"}} {
+		for _, args := range [][]string{{"init"}, {"config", "user.email", "snapshot@example.com"}, {"config", "user.name", "Snapshot Test"}, {"config", "core.autocrlf", "false"}} {
 			if snapshotRepoTemplateErr = runSnapshotGit(template, args...); snapshotRepoTemplateErr != nil {
 				_ = os.RemoveAll(template)
 				return

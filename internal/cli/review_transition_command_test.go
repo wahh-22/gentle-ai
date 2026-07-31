@@ -32,7 +32,7 @@ func reviewStartTransitionForCommand(t *testing.T, lineage string, kind reviewtr
 			BaseTree: strings.Repeat("c", 40), CurrentCandidateTree: strings.Repeat("d", 40),
 		},
 	}
-	got := newReviewNextTransition(status, nil, nil, false, nil, reviewNextTransitionInput{StartLineage: lineage})
+	got := newReviewNextTransition(status, nil, nil, nil, nil, reviewNextTransitionInput{StartLineage: lineage})
 	if got.Kind != reviewNextTransitionExecute || got.Execute == nil || got.Execute.Operation != "review.start" {
 		t.Fatalf("next transition = %#v, want an execute review.start transition", got)
 	}
@@ -53,6 +53,33 @@ func TestReviewNextTransitionExecuteEmitsRunnableCommand(t *testing.T) {
 		" --lineage=review-start-command"
 	if got.Execute.Command != want {
 		t.Fatalf("execute command = %q, want %q", got.Execute.Command, want)
+	}
+}
+
+func TestReviewNextTransitionV2StartCommandCarriesConsentRelay(t *testing.T) {
+	status := ReviewTargetStatusResult{
+		Contract:       ReviewIntegrationContractV2,
+		Applicability:  reviewtransaction.TargetApplicabilityUnrelated,
+		TargetIdentity: "sha256:" + strings.Repeat("b", 64),
+		Projection: ReviewTargetStatusProjection{
+			Kind: reviewtransaction.TargetCurrentChanges, Projection: reviewtransaction.ProjectionWorkspace,
+			BaseTree: strings.Repeat("c", 40), CurrentCandidateTree: strings.Repeat("d", 40),
+		},
+	}
+	got := newReviewNextTransition(status, nil, nil, nil, nil, reviewNextTransitionInput{StartLineage: "review-v2-consent-command"})
+	want := "gentle-ai review start" +
+		" --contract=gentle-ai.review-integration/v2" +
+		" --target=sha256:" + strings.Repeat("b", 64) +
+		" --projection=workspace" +
+		" --lineage=review-v2-consent-command" +
+		" --consent=relay"
+	if got.Execute == nil || got.Execute.Command != want {
+		t.Fatalf("v2 execute command = %#v, want %q", got.Execute, want)
+	}
+	for _, argument := range got.Execute.Arguments {
+		if !strings.Contains(got.Execute.Command, argument.Token) {
+			t.Fatalf("v2 execute command dropped token %q: %s", argument.Token, got.Execute.Command)
+		}
 	}
 }
 
@@ -165,7 +192,7 @@ func reviewTransitionExecutionOperationEnum(t *testing.T, schemaFile string) []s
 // TestReviewCapabilitiesSchemaAndFixtureAreStrict,
 // TestReviewCapabilitiesVersionsKeepV1ReadableAndFailClosedAcrossSchemas and
 // TestReviewIntegrationOperationRegistryOwnsPublishedAndFailurePolicy), plus
-// the v1.1-v1.4 capability fixtures external consumers read. That is a
+// the v1.1-v1.5 capability fixtures external consumers read. That is a
 // published-contract change and a maintainer decision, not a derivation.
 //
 // This map fails closed in BOTH directions below, so it can never rot: a new
@@ -268,6 +295,10 @@ func TestReviewTransitionCommandQuotesFreeTextValues(t *testing.T) {
 // the emitted line and reports each argv entry, which must be byte-identical
 // to the payload's own tokens.
 func TestReviewTransitionCommandQuotedTokensSurviveShellWordSplitting(t *testing.T) {
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("POSIX shell is unavailable")
+	}
 	arguments := []ReviewTransitionArgument{
 		{Name: "lineage", Value: "review-quote", Token: "--lineage=review-quote"},
 		{Name: "reason", Value: "historical alias repair", Token: "--reason=historical alias repair"},
@@ -275,7 +306,7 @@ func TestReviewTransitionCommandQuotedTokensSurviveShellWordSplitting(t *testing
 	}
 	command := reviewTransitionCommandLine("review.repair", arguments)
 	script := "set -- " + strings.TrimPrefix(command, "gentle-ai review repair ") + "\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done"
-	output, err := exec.Command("/bin/sh", "-c", script).Output()
+	output, err := exec.Command(shell, "-c", script).Output()
 	if err != nil {
 		t.Fatalf("shell rejected the emitted command %q: %v", command, err)
 	}
