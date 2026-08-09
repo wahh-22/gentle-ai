@@ -81,6 +81,7 @@ type TargetStatusResult struct {
 	OriginalChangedLines    int                                `json:"original_changed_lines,omitempty"`
 	Tier                    RiskLevel                          `json:"tier,omitempty"`
 	CorrectionBudget        int                                `json:"correction_budget,omitempty"`
+	CorrectionBudgetPolicy  string                             `json:"correction_budget_policy,omitempty"`
 	SelectedLenses          []string                           `json:"selected_lenses,omitempty"`
 	TargetIdentity          string                             `json:"target_identity"`
 	AuthorityTargetIdentity string                             `json:"authority_target_identity,omitempty"`
@@ -129,8 +130,61 @@ func AssessTargetStatusWithSnapshot(ctx context.Context, repo string, request Ta
 	if err != nil {
 		return TargetStatusResult{}, Snapshot{}, err
 	}
+	if request.LineageID == "" && request.Target.Kind == TargetCurrentChanges && request.Target.Projection == ProjectionWorkspace {
+		candidates, recoveryErr := selectorlessCommittedBaseDiffCorrections(ctx, repo)
+		if recoveryErr != nil {
+			return TargetStatusResult{}, Snapshot{}, recoveryErr
+		}
+		switch len(candidates) {
+		case 0:
+		case 1:
+			live, request.LineageID = candidates[0].snapshot, candidates[0].lineage
+		default:
+			lineages := make([]string, len(candidates))
+			for index, candidate := range candidates {
+				lineages[index] = candidate.lineage
+			}
+			return TargetStatusResult{
+				Applicability: TargetApplicabilityAmbiguous, Action: TargetStatusActionSelectLineage,
+				Replayability: ReplayabilityStatusRequired, TargetIdentity: live.Identity,
+				Projection: targetProjectionFromSnapshot(live), CandidateLineageIDs: lineages,
+			}, live, nil
+		}
+	}
 	result, err := assessTargetStatusSnapshot(ctx, repo, request, live)
 	return result, live, err
+}
+
+type selectorlessCommittedBaseDiffCorrection struct {
+	lineage  string
+	snapshot Snapshot
+}
+
+func selectorlessCommittedBaseDiffCorrections(ctx context.Context, repo string) ([]selectorlessCommittedBaseDiffCorrection, error) {
+	stores, err := DiscoverCompactStores(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []selectorlessCommittedBaseDiffCorrection{}
+	for _, store := range stores {
+		record, loadErr := store.LoadContext(ctx)
+		if loadErr != nil {
+			if IsCompactAuthorityOperationalFailure(loadErr) {
+				return nil, loadErr
+			}
+			continue
+		}
+		live, rebuildErr := RebuildCommittedBaseDiffCorrectionCandidate(ctx, repo, record.State)
+		if rebuildErr != nil {
+			if IsCompactAuthorityOperationalFailure(rebuildErr) || IsCorrectionBudgetExceeded(rebuildErr) {
+				return nil, rebuildErr
+			}
+			continue
+		}
+		candidates = append(candidates, selectorlessCommittedBaseDiffCorrection{lineage: record.State.LineageID, snapshot: live})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].lineage < candidates[j].lineage })
+	return candidates, nil
 }
 
 func assessTargetStatusSnapshot(ctx context.Context, repo string, request TargetStatusRequest, live Snapshot) (TargetStatusResult, error) {
@@ -351,7 +405,7 @@ func targetStatusForCandidate(result TargetStatusResult, candidate targetStatusC
 		state := record.State
 		result.State, result.Generation, result.Revision = state.State, state.Generation, record.Revision
 		result.AuthorityTargetIdentity = state.CurrentSnapshot.Identity
-		result.OriginalChangedLines, result.Tier, result.CorrectionBudget = state.OriginalChangedLines, state.RiskLevel, state.CorrectionBudget
+		result.OriginalChangedLines, result.Tier, result.CorrectionBudget, result.CorrectionBudgetPolicy = state.OriginalChangedLines, state.RiskLevel, state.CorrectionBudget, state.CorrectionBudgetPolicy
 		result.SelectedLenses = append([]string{}, state.SelectedLenses...)
 		result.Projection = targetProjectionFromCompact(state, result.Projection)
 		result.ReceiptIdentity = candidate.receiptIdentity
@@ -415,12 +469,7 @@ func inspectLegacyTargetReceipt(store Store, transaction Transaction) (string, e
 	if err != nil {
 		return "", fmt.Errorf("derive terminal legacy receipt: %w", err)
 	}
-	canonical, err := json.MarshalIndent(expected, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("canonicalize legacy target receipt: %w", err)
-	}
-	canonical = append(canonical, '\n')
-	if !reflect.DeepEqual(existing, expected) || !bytes.Equal(payload, canonical) {
+	if !reflect.DeepEqual(existing, expected) {
 		return "", errors.New("legacy target receipt does not equal the canonical derived receipt")
 	}
 	sum := sha256.Sum256(payload)
