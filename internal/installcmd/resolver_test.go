@@ -510,7 +510,7 @@ func TestValidateAgentInstallPreflight(t *testing.T) {
 		},
 		{
 			// Pi requires both `pi` and npm: InstallCommand always runs engramInitCommand()
-			// which executes `pnpm dlx` or `npm exec` (both need Node.js/npm).
+			// which executes `npm exec` and therefore needs Node.js/npm.
 			name:    "pi with binary and npm present passes preflight",
 			profile: system.PlatformProfile{OS: "linux", PackageManager: "apt", Supported: true},
 			agent:   model.AgentPi,

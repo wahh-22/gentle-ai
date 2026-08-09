@@ -251,9 +251,8 @@ func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, er
 }
 
 func (a *Adapter) engramInitCommand() []string {
-	if _, err := a.lookPath("pnpm"); err == nil {
-		return []string{"pnpm", "--config.auto-install-peers=false", "--reporter=append-only", "dlx", "gentle-engram@latest", "init"}
-	}
+	// Pi's preflight guarantees npm. Avoid pnpm here because packaged pnpm
+	// binaries can embed a Node runtime that aborts in libuv after dlx completes.
 	return []string{"npm", "exec", "--yes", "--package", "gentle-engram@latest", "--", "pi-engram", "init"}
 }
 

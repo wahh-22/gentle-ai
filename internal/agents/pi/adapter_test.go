@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -255,12 +254,9 @@ func TestAdapterDetectMissingPiBinary(t *testing.T) {
 	}
 }
 
-func TestAdapterInstallCommandSequenceUsesNpmWhenPnpmIsUnavailable(t *testing.T) {
+func TestAdapterInstallCommandSequenceUsesNpmForEngramInitWhenPnpmIsAvailable(t *testing.T) {
 	a := &Adapter{
 		lookPath: func(file string) (string, error) {
-			if file == "pnpm" {
-				return "", os.ErrNotExist
-			}
 			return "/usr/local/bin/" + file, nil
 		},
 		statPath: defaultStat,
@@ -302,35 +298,6 @@ func TestAdapterInstallCommandSequenceUsesSameSubagentsPackageForWindows(t *test
 	want := []string{"pi", "install", "npm:pi-subagents-j0k3r"}
 	if !reflect.DeepEqual(commands[2], want) {
 		t.Fatalf("InstallCommand()[2] = %#v, want %#v", commands[2], want)
-	}
-}
-
-func TestAdapterInstallCommandSequenceUsesPnpmForEngramInitWhenAvailable(t *testing.T) {
-	a := &Adapter{
-		lookPath: func(file string) (string, error) {
-			if file == "pnpm" {
-				return "/usr/local/bin/pnpm", nil
-			}
-			return "", os.ErrNotExist
-		},
-		statPath: defaultStat,
-	}
-	commands, err := a.InstallCommand(system.PlatformProfile{})
-	if err != nil {
-		t.Fatalf("InstallCommand() error = %v", err)
-	}
-
-	want := []string{"pnpm", "--config.auto-install-peers=false", "--reporter=append-only", "dlx", "gentle-engram@latest", "init"}
-	if !reflect.DeepEqual(commands[1], want) {
-		t.Fatalf("InstallCommand()[1] = %#v, want %#v", commands[1], want)
-	}
-	configIndex := slices.Index(commands[1], "--config.auto-install-peers=false")
-	dlxIndex := slices.Index(commands[1], "dlx")
-	if configIndex < 0 || dlxIndex < 0 || configIndex >= dlxIndex {
-		t.Fatalf("pnpm config flag must precede dlx; got %#v", commands[1])
-	}
-	if !slices.Contains(commands[1], "--reporter=append-only") {
-		t.Fatalf("pnpm command missing append-only reporter; got %#v", commands[1])
 	}
 }
 
