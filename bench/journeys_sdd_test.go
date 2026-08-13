@@ -36,20 +36,18 @@ func TestPortableSDDFailClosedAuthorityJourneysAreRegistered(t *testing.T) {
 			want[journey.ID] = true
 		}
 	}
-	// 83 since j76-claude-advisory-result-reaches-delivery (#2692, #2566),
-	// j77-capture-result-input-preflight-is-read-only (#2630 D2),
-	// j78-lens-finding-id-prefix-discovery (#1844), j79-consecutive-rescope-
-	// refuses-before-publication (#2830), and j80-rescope-authorized-evidence-
-	// only-retry (#2621).
-	// j81's RC-created repair fixture (#2839) follows the independently-owned
-	// #2621 journey.
-	// j82 proves #2127's reviewed full candidate can publish an unpublished
-	// monotonic subset without reopening review.
-	// Bump this deliberately when a journey is added, and name it here: the
-	// count exists so a journey cannot appear or vanish unnoticed.
-	if got := len(seen); got != 83 {
-		t.Errorf("core journey count = %d, want 83", got)
-	}
+	// The corpus total used to be asserted here as a hand-written integer. It
+	// moved to bench/testdata/journeys.manifest, because two branches that each
+	// add one journey each write the same next number and git resolves that
+	// silently by taking one side. See TestRegisteredJourneysMatchTheManifest.
+	//
+	// Kept because it is knowledge rather than bookkeeping: #1993 REMOVED two
+	// journeys, j38 (the bound-passing-finish refusal routing to the review
+	// router) and j39 (the stranded-successor exit it named). Review acts after
+	// implementation and verification, so that refusal is gone and both
+	// journeys had no subject left. j37 survives, rewritten to prove the
+	// opposite of what it used to: the bound passing finish now CLOSES over a
+	// corrected candidate and keeps the binding recorded.
 	for id, found := range want {
 		if !found {
 			t.Errorf("required SDD authority journey %q is not registered", id)

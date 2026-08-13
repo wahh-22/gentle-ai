@@ -165,6 +165,13 @@ func RunInstall(args []string, detection system.DetectionResult) (InstallResult,
 				"will be written to each selected agent's global config directory and will affect ALL workspaces for those agents on this machine.\n"+
 				"To install only into the current workspace, rerun with --scope=workspace.\n\n")
 	}
+	var openCodeRuntime *state.OpenCodeRuntimeProvenance
+	if hasOpenCodeReviewerPlugin(input.Selection.Agents) {
+		openCodeRuntime, err = captureOpenCodeRuntimeProvenance()
+		if err != nil {
+			return result, fmt.Errorf("capture OpenCode reviewer runtime provenance: %w", err)
+		}
+	}
 
 	runtime, err := newInstallRuntime(homeDir, input.Scope, input.Channel, input.Selection, resolved, profile)
 	if err != nil {
@@ -201,7 +208,12 @@ func RunInstall(args []string, detection system.DetectionResult) (InstallResult,
 	})
 	result.Verify = withPostInstallNotes(result.Verify, resolved)
 	if !result.Verify.Ready {
-		return result, fmt.Errorf("post-apply verification failed:\n%s", verify.RenderReport(result.Verify))
+		verificationErr := fmt.Errorf("post-apply verification failed:\n%s", verify.RenderReport(result.Verify))
+		rollback := orchestrator.Rollback(result.Execution)
+		if rollback.Err != nil {
+			verificationErr = errors.Join(verificationErr, rollback.Err)
+		}
+		return result, verificationErr
 	}
 
 	// Persist the user's agent selection and model assignments so that future
@@ -218,6 +230,7 @@ func RunInstall(args []string, detection system.DetectionResult) (InstallResult,
 	claudePhaseState := claudePhaseAssignmentsToState(input.Selection.ClaudePhaseAssignments)
 	newState := state.InstallState{
 		InstalledAgents:             agentIDs,
+		InstalledBinaryVersion:      AppVersion,
 		CommunityTools:              communityToolIDsToStrings(input.Selection.CommunityTools),
 		CommunityToolsConfigured:    true,
 		ClaudeModelAssignments:      claudeLegacyAssignmentsForState(input.Selection.ClaudeModelAssignments, claudePhaseState),
@@ -229,6 +242,7 @@ func RunInstall(args []string, detection system.DetectionResult) (InstallResult,
 		CodexPhaseModelAssignments:  input.Selection.CodexPhaseModelAssignments,
 		ModelAssignments:            modelAssignmentsToState(input.Selection.ModelAssignments),
 		Persona:                     string(input.Selection.Persona),
+		OpenCodeRuntimeProvenance:   openCodeRuntime,
 	}
 	newState.SetSelection(input.Selection)
 	writer, err := managedAssetDigest()
@@ -236,7 +250,12 @@ func RunInstall(args []string, detection system.DetectionResult) (InstallResult,
 		return result, fmt.Errorf("derive managed asset writer identity: %w", err)
 	}
 	if err := persistInstallState(homeDir, newState, agentIDs, flags, writer); err != nil {
-		return result, fmt.Errorf("persist install state: %w", err)
+		persistErr := fmt.Errorf("persist install state: %w", err)
+		rollback := orchestrator.Rollback(result.Execution)
+		if rollback.Err != nil {
+			persistErr = errors.Join(persistErr, rollback.Err)
+		}
+		return result, persistErr
 	}
 
 	return result, nil
@@ -252,7 +271,7 @@ func persistInstallState(homeDir string, newState state.InstallState, agentIDs [
 			newState = merged
 		}
 		newState.ManagedAssetDigest = writer
-		return state.Write(homeDir, newState)
+		return state.WriteReconciled(homeDir, newState)
 	})
 }
 
@@ -303,6 +322,10 @@ func mergeExplicitAgentInstallState(homeDir string, newState state.InstallState,
 	}
 	if newState.CodexPhaseModelAssignments != nil {
 		merged.CodexPhaseModelAssignments = newState.CodexPhaseModelAssignments
+	}
+	if newState.OpenCodeRuntimeProvenance != nil {
+		provenance := *newState.OpenCodeRuntimeProvenance
+		merged.OpenCodeRuntimeProvenance = &provenance
 	}
 	if merged.SelectionConfigured {
 		if len(flags.Components) > 0 {
@@ -1531,6 +1554,14 @@ func (s componentApplyStep) Run() error {
 		return nil
 	case model.ComponentPersona:
 		for _, adapter := range adapters {
+			if adapter.Agent() == model.AgentPi {
+				for _, rootDir := range piPersonaConfigRoots(s.homeDir, s.workspaceDir, s.scope) {
+					if _, err := persona.InjectPiPersona(rootDir, s.selection.Persona); err != nil {
+						return fmt.Errorf("inject persona for %q: %w", adapter.Agent(), err)
+					}
+				}
+				continue
+			}
 			targetDir := componentInjectionDirScoped(s.homeDir, s.workspaceDir, s.scope, adapter)
 			if _, err := persona.Inject(targetDir, adapter, s.selection.Persona); err != nil {
 				return fmt.Errorf("inject persona for %q: %w", adapter.Agent(), err)
@@ -1697,18 +1728,19 @@ func shouldAttemptEngramSetup(profile system.PlatformProfile, mode engram.SetupM
 	return engram.ShouldAttemptSetup(mode, agent)
 }
 
-// ExecuteTUIInstall runs the same install runtime as the CLI and carries
-// non-fatal Pi CodeGraph manual actions into the TUI completion result.
 // The seam lets native tests add a post-publication failure while still using
 // the public TUI execution boundary and the real compatibility writer.
 var tuiInstallStagePlan = func(runtime *installRuntime) pipeline.StagePlan {
 	return runtime.stagePlan()
 }
 
-func ExecuteTUIInstall(homeDir string, selection model.Selection, resolved planner.ResolvedPlan, profile system.PlatformProfile, onProgress pipeline.ProgressFunc) pipeline.ExecutionResult {
+// ExecuteTUIInstallWithOrchestrator runs a TUI install and returns the
+// orchestrator so a downstream state-persistence failure can be compensated.
+// Carries non-fatal Pi CodeGraph manual actions into the TUI completion result.
+func ExecuteTUIInstallWithOrchestrator(homeDir string, selection model.Selection, resolved planner.ResolvedPlan, profile system.PlatformProfile, onProgress pipeline.ProgressFunc) (pipeline.ExecutionResult, *pipeline.Orchestrator) {
 	runtime, err := newInstallRuntime(homeDir, ScopeGlobal, ChannelStable, selection, resolved, profile)
 	if err != nil {
-		return pipeline.ExecutionResult{Err: err}
+		return pipeline.ExecutionResult{Err: err}, nil
 	}
 	defer runtime.state.cleanupCompatibilityTransaction()
 	orchestrator := pipeline.NewOrchestrator(pipeline.DefaultRollbackPolicy(), pipeline.WithFailurePolicy(pipeline.ContinueOnError), pipeline.WithProgressFunc(onProgress))
@@ -1717,7 +1749,7 @@ func ExecuteTUIInstall(homeDir string, selection model.Selection, resolved plann
 	if runtime.state.piCodeGraph != nil {
 		result.ManualActions = append(result.ManualActions, runtime.state.piCodeGraph.ManualActions...)
 	}
-	return result
+	return result, orchestrator
 }
 
 // RenderInstallManualActions renders non-fatal completion actions after the
@@ -1842,6 +1874,11 @@ func backupTargets(homeDir, workspaceDir string, scope InstallScope, selection m
 		for _, path := range componentPathsWithWorkspaceScoped(homeDir, workspaceDir, scope, selection, adapters, component) {
 			paths[path] = struct{}{}
 		}
+		if component == model.ComponentContext7 {
+			for _, path := range claudeMCPSettingsCleanupPaths(homeDir, workspaceDir, scope, adapters) {
+				paths[path] = struct{}{}
+			}
+		}
 		if component == model.ComponentEngram && scope == ScopeGlobal {
 			for _, adapter := range adapters {
 				if adapter.Agent() == model.AgentClaudeCode {
@@ -1940,6 +1977,24 @@ func adapterSkillBackupTargets(homeDir, workspaceDir string, scope InstallScope,
 		}
 	}
 	return paths, nil
+}
+
+// claudeMCPSettingsCleanupPaths returns legacy Claude settings files that MCP
+// injection may rewrite while removing an inert mcpServers block. These paths
+// belong in the rollback snapshot, but not in post-apply verification because
+// cleanup is best-effort and the file may not exist.
+func claudeMCPSettingsCleanupPaths(homeDir, workspaceDir string, scope InstallScope, adapters []agents.Adapter) []string {
+	paths := []string{}
+	for _, adapter := range adapters {
+		if adapter.Agent() != model.AgentClaudeCode || adapter.MCPStrategy() != model.StrategySeparateMCPFiles {
+			continue
+		}
+		targetDir := componentPathDirScoped(homeDir, workspaceDir, scope, adapter, model.ComponentContext7)
+		if path := adapter.SettingsPath(targetDir); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 // routingGuidancePaths declares the files agentRoutingGuidanceStep rewrites for
@@ -2091,9 +2146,14 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 					if targetDir == homeDir {
 						// Context7 injection writes ~/.claude.json (issue #1868).
 						paths = append(paths, claude.UserConfigPath(homeDir))
-					} else if p := adapter.SettingsPath(targetDir); p != "" {
-						// Workspace scope keeps the scoped settings merge.
-						paths = append(paths, p)
+					} else {
+						// Workspace scope writes <project-root>/.mcp.json, the file
+						// Claude Code loads project-scoped MCP servers from (issue #2213).
+						// The legacy .claude/settings.json block is a best-effort
+						// cleanup, not a guaranteed write, so it is not declared as a
+						// verification target (declaring it would force a false-negative
+						// when the file never existed).
+						paths = append(paths, filepath.Join(targetDir, ".mcp.json"))
 					}
 					break
 				}
@@ -2113,6 +2173,10 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			}
 		case model.ComponentPersona:
 			if selection.Persona == model.PersonaCustom {
+				break
+			}
+			if adapter.Agent() == model.AgentPi {
+				paths = append(paths, piPersonaConfigPaths(homeDir, workspaceDir, scope)...)
 				break
 			}
 			if adapter.Agent() == model.AgentOpenClaw {
@@ -2213,6 +2277,27 @@ func componentInjectionDirScoped(homeDir, workspaceDir string, scope InstallScop
 		return workspaceDir
 	}
 	return ResolveAgentConfigDir(scope, homeDir, workspaceDir)
+}
+
+// piPersonaConfigRoots returns the roots whose Pi persona state is managed by
+// install. Global install keeps its global fallback and seeds the active
+// workspace so Pi sees the selected persona immediately; workspace install is
+// limited to the workspace root like every other scoped component.
+func piPersonaConfigRoots(homeDir, workspaceDir string, scope InstallScope) []string {
+	roots := []string{ResolveAgentConfigDir(scope, homeDir, workspaceDir)}
+	if scope == ScopeGlobal && strings.TrimSpace(workspaceDir) != "" && filepath.Clean(workspaceDir) != filepath.Clean(homeDir) {
+		roots = append(roots, workspaceDir)
+	}
+	return roots
+}
+
+func piPersonaConfigPaths(homeDir, workspaceDir string, scope InstallScope) []string {
+	roots := piPersonaConfigRoots(homeDir, workspaceDir, scope)
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		paths = append(paths, persona.PiPersonaConfigPath(root))
+	}
+	return paths
 }
 
 func codeGraphGuidanceMarkdownForSDD(homeDir string, selected []model.CommunityToolID) string {

@@ -358,8 +358,8 @@ func BuildSyncSelection(flags SyncFlags, agentIDs []model.AgentID) model.Selecti
 		// correct default skill set when no explicit skills are provided.
 		Preset: model.PresetFullGentleman,
 		// Persona is left as zero-value here. RunSync resolves it from state.json
-		// when present. Missing or invalid persisted persona resolves to neutral
-		// so sync does not silently reactivate regional persona behavior.
+		// when present. A missing persona field resolves to neutral; invalid state
+		// is rejected so sync cannot silently reactivate regional persona behavior.
 	}
 }
 
@@ -445,14 +445,15 @@ func DiscoverAgents(homeDir string) []model.AgentID {
 // It reuses backup/rollback infrastructure but only calls inject functions —
 // no agentInstallStep, no engram setup, no persona.
 type syncRuntime struct {
-	homeDir      string
-	workspaceDir string
-	selection    model.Selection
-	agentIDs     []model.AgentID
-	backupRoot   string
-	state        *runtimeState
-	managedPaths []string
-	changedFiles []string // accumulates candidate paths reported by component injectors
+	homeDir         string
+	workspaceDir    string
+	selection       model.Selection
+	agentIDs        []model.AgentID
+	backupRoot      string
+	state           *runtimeState
+	managedPaths    []string
+	changedFiles    []string // accumulates candidate paths reported by component injectors
+	openCodeRuntime *state.OpenCodeRuntimeProvenance
 }
 
 func newSyncRuntime(homeDir string, selection model.Selection) (*syncRuntime, error) {
@@ -464,14 +465,22 @@ func newSyncRuntime(homeDir string, selection model.Selection) (*syncRuntime, er
 		return nil, err
 	}
 
-	return &syncRuntime{
+	runtime := &syncRuntime{
 		homeDir:      homeDir,
 		workspaceDir: workspaceDir,
 		selection:    selection,
 		agentIDs:     selection.Agents,
 		backupRoot:   backupRoot,
 		state:        &runtimeState{compatibilityTransaction: compatibilityTransaction},
-	}, nil
+	}
+	if hasOpenCodeReviewerPlugin(selection.Agents) {
+		provenance, err := captureOpenCodeRuntimeProvenance()
+		if err != nil {
+			return nil, fmt.Errorf("capture OpenCode reviewer runtime provenance: %w", err)
+		}
+		runtime.openCodeRuntime = provenance
+	}
+	return runtime, nil
 }
 
 func (r *syncRuntime) stagePlan() pipeline.StagePlan {
@@ -578,6 +587,11 @@ func syncBackupTargets(homeDir, workspaceDir string, selection model.Selection, 
 	for _, component := range selection.Components {
 		for _, path := range syncComponentPathsWithWorkspace(homeDir, workspaceDir, selection, adapters, component) {
 			paths[path] = struct{}{}
+		}
+		if component == model.ComponentContext7 {
+			for _, path := range claudeMCPSettingsCleanupPaths(homeDir, workspaceDir, ScopeGlobal, adapters) {
+				paths[path] = struct{}{}
+			}
 		}
 		if component == model.ComponentEngram {
 			for _, adapter := range adapters {
@@ -705,10 +719,11 @@ func syncComponentPathsWithWorkspace(homeDir, workspaceDir string, selection mod
 }
 
 // syncPersonaPaths returns the file paths that ComponentPersona writes during
-// sync. Mirrors persona.InjectForSync:
+// sync. Mirrors persona.InjectForSync and the Pi runtime config writer:
 //   - Step 1: SystemPromptFile (the marker-bound markdown block — CLAUDE.md /
 //     AGENTS.md / equivalent).
 //   - Step 3: managed output-style overlay (only when the agent supports it).
+//   - Pi: the project-local gentle-pi persona state file.
 //
 // Step 2 (OpenCode/Kilocode agent definition in opencode.json) is install-only
 // and intentionally NOT declared here.
@@ -722,6 +737,14 @@ func syncPersonaPathsWithWorkspace(homeDir, workspaceDir string, selection model
 	}
 	paths := []string{}
 	for _, adapter := range adapters {
+		if adapter.Agent() == model.AgentPi {
+			rootDir := workspaceDir
+			if strings.TrimSpace(rootDir) == "" {
+				rootDir = homeDir
+			}
+			paths = append(paths, persona.PiPersonaConfigPath(rootDir))
+			continue
+		}
 		targetDir := componentInjectionDir(homeDir, workspaceDir, adapter)
 		if adapter.Agent() == model.AgentOpenClaw {
 			paths = append(paths, filepath.Join(targetDir, "SOUL.md"))
@@ -1151,6 +1174,18 @@ func (s componentSyncStep) Run() error {
 		// merge conflicts with SDD's writes to the same settings file and
 		// remains an install-only concern.
 		for _, adapter := range adapters {
+			if adapter.Agent() == model.AgentPi {
+				rootDir := s.workspaceDir
+				if strings.TrimSpace(rootDir) == "" {
+					rootDir = s.homeDir
+				}
+				res, err := persona.InjectPiPersona(rootDir, s.selection.Persona)
+				if err != nil {
+					return fmt.Errorf("sync persona for %q: %w", adapter.Agent(), err)
+				}
+				s.countChanged(boolToInt(res.Changed), res.Files...)
+				continue
+			}
 			targetDir := componentInjectionDir(s.homeDir, s.workspaceDir, adapter)
 			res, err := persona.InjectForSync(targetDir, adapter, s.selection.Persona)
 			if err != nil {
@@ -1406,10 +1441,10 @@ func boolToInt(b bool) int {
 //
 // Resolution order:
 //  1. Explicit: if selection.Persona is non-empty, it is left untouched.
-//  2. Persisted: the persisted string is normalized via normalizePersona;
-//     on error (unknown/misspelled value) the fallback is used instead.
-//  3. Fallback: PersonaNeutral for default-safe behavior when persisted state is
-//     missing, empty, unreadable, or invalid.
+//  2. Persisted: the persisted string is normalized via normalizePersona.
+//  3. Fallback: PersonaNeutral for default-safe behavior when the persona field
+//     is empty or the state file is absent. Other read/validation errors are
+//     rejected by validatePersistedSyncState before this function is called.
 func applyResolvedPersona(selection *model.Selection, persisted string) {
 	if selection.Persona != "" {
 		return
@@ -1419,11 +1454,9 @@ func applyResolvedPersona(selection *model.Selection, persisted string) {
 			selection.Persona = id
 			return
 		}
-		// Unknown/misspelled persisted value — fall through to neutral.
+		// The sync entry points reject unknown persisted values before resolution.
 	}
-	// Default-safe fallback: state files written before persona persistence have
-	// no Persona field, and unreadable/invalid state must not implicitly restore
-	// regional persona behavior.
+	// Default-safe fallback for state files written before persona persistence.
 	selection.Persona = model.PersonaNeutral
 }
 
@@ -1445,6 +1478,33 @@ func migratePersistedPersonaAlias(homeDir string, persisted *state.InstallState,
 	return nil
 }
 
+// validatePersistedSyncState rejects state that cannot safely drive sync.
+// A missing state file is allowed for fresh homes; a decoded state without a
+// persona remains compatible with legacy installations.
+func validatePersistedSyncState(persisted state.InstallState, readErr error) error {
+	// guard:population persisted-sync-state-integrity fail-closed: legitimate persisted sync state is a missing file or decoded state with an empty or supported persona; read/decode errors, whitespace-only values, and unsupported persona values remain excluded
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return nil
+		}
+		return fmt.Errorf("read persisted installation state: %w", readErr)
+	}
+
+	if persisted.Persona == "" {
+		if persisted.PersonaPresent {
+			return fmt.Errorf("validate persisted persona: explicitly empty persona is not valid") // refusal:by-design operator-knowledge: only the operator can choose the intended persona to replace malformed persisted state
+		}
+		return nil
+	}
+	if strings.TrimSpace(persisted.Persona) == "" {
+		return fmt.Errorf("validate persisted persona: whitespace-only persona is not valid") // refusal:by-design operator-knowledge: only the operator can choose the intended persona to replace malformed persisted state
+	}
+	if _, _, err := normalizePersona(persisted.Persona); err != nil {
+		return fmt.Errorf("validate persisted persona: %w", err)
+	}
+	return nil
+}
+
 // RunSyncWithSelection is the programmatic entry point for sync.
 // It skips flag parsing and agent discovery — the caller provides the homeDir
 // and a fully-built Selection (agents + components + options).
@@ -1455,6 +1515,9 @@ func RunSyncWithSelection(homeDir string, selection model.Selection) (SyncResult
 	// below must not rewrite state it could not read. Managed-asset provenance
 	// re-reads under its own lock later (#2685), so this read stays advisory.
 	persistedState, persistedStateErr := state.Read(homeDir)
+	if err := validatePersistedSyncState(persistedState, persistedStateErr); err != nil {
+		return SyncResult{Agents: agentIDs, Selection: selection}, err
+	}
 	restorePersistedCommunityTools(homeDir, &selection, persistedState)
 
 	// Resolve persona from persisted state when the caller has not provided one.
@@ -1529,20 +1592,30 @@ func RunSyncWithSelection(homeDir string, selection model.Selection) (SyncResult
 	result.Verify = runPostSyncVerification(homeDir, rt.workspaceDir, selection)
 	result.Verify = withFailedSyncVerificationNote(result.Verify)
 	if !result.Verify.Ready {
-		return result, fmt.Errorf("post-sync verification failed:\n%s", verify.RenderReport(result.Verify))
+		verificationErr := fmt.Errorf("post-sync verification failed:\n%s", verify.RenderReport(result.Verify))
+		rollback := orchestrator.Rollback(result.Execution)
+		if rollback.Err != nil {
+			verificationErr = errors.Join(verificationErr, rollback.Err)
+		}
+		return result, verificationErr
 	}
 	writer, err := managedAssetDigest()
 	if err != nil {
 		return result, fmt.Errorf("derive managed asset writer identity: %w", err)
 	}
-	if err := persistSyncManagedAssetState(homeDir, selection, writer); err != nil {
-		return result, err
+	if err := persistSyncManagedAssetState(homeDir, selection, writer, rt.openCodeRuntime); err != nil {
+		persistErr := fmt.Errorf("persist sync managed asset state: %w", err)
+		rollback := orchestrator.Rollback(result.Execution)
+		if rollback.Err != nil {
+			persistErr = errors.Join(persistErr, rollback.Err)
+		}
+		return result, persistErr
 	}
 
 	return result, nil
 }
 
-func persistSyncManagedAssetState(homeDir string, selection model.Selection, writer string) error {
+func persistSyncManagedAssetState(homeDir string, selection model.Selection, writer string, runtimeProvenance *state.OpenCodeRuntimeProvenance) error {
 	return withInstallStateLock(homeDir, func() error {
 		latest, err := state.Read(homeDir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -1554,8 +1627,20 @@ func persistSyncManagedAssetState(homeDir string, selection model.Selection, wri
 		}
 
 		shouldWrite := false
+		// #2685: stamp the binary version that performed this sync, so doctor
+		// can report managed assets older than the running binary instead of
+		// the user discovering the skew mid-review at START preflight.
+		if latest.InstalledBinaryVersion != AppVersion {
+			latest.InstalledBinaryVersion = AppVersion
+			shouldWrite = true
+		}
 		if latest.ManagedAssetDigest != writer {
 			latest.ManagedAssetDigest = writer
+			shouldWrite = true
+		}
+		if runtimeProvenance != nil && (latest.OpenCodeRuntimeProvenance == nil || *latest.OpenCodeRuntimeProvenance != *runtimeProvenance) {
+			provenance := *runtimeProvenance
+			latest.OpenCodeRuntimeProvenance = &provenance
 			shouldWrite = true
 		}
 		if !latest.CommunityToolsConfigured && selection.CommunityTools != nil {
@@ -1566,7 +1651,7 @@ func persistSyncManagedAssetState(homeDir string, selection model.Selection, wri
 		if !shouldWrite {
 			return nil
 		}
-		if err := state.Write(homeDir, latest); err != nil {
+		if err := state.WriteReconciled(homeDir, latest); err != nil {
 			return fmt.Errorf("persist managed asset provenance: %w", err)
 		}
 		return nil
@@ -1603,9 +1688,12 @@ func RunSync(args []string) (SyncResult, error) {
 	selection := BuildSyncSelection(flags, agentIDs)
 
 	// Read state once for both model-assignment restoration and persona resolution.
-	// On error (e.g. state.json absent), treat persisted values as empty — model
-	// maps stay as-is and persona falls back to neutral.
-	persistedState, _ := state.Read(homeDir)
+	// A missing state file is treated as a fresh home; other read/validation
+	// errors stop sync before any persona mutation or asset write.
+	persistedState, persistedStateErr := state.Read(homeDir)
+	if err := validatePersistedSyncState(persistedState, persistedStateErr); err != nil {
+		return SyncResult{Agents: agentIDs, Selection: selection}, err
+	}
 	RestorePersistedSelection(&selection, persistedState, flags)
 	restorePersistedCommunityTools(homeDir, &selection, persistedState)
 
