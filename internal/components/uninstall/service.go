@@ -1,12 +1,14 @@
 package uninstall
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/sdd"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/theme"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
+	opencodeactivation "github.com/gentleman-programming/gentle-ai/v2/internal/opencode"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/state"
 )
 
@@ -114,6 +117,7 @@ var (
 		"sdd-orchestrator", // legacy key — kept for backward-compat cleanup
 		"sdd-init",
 		"sdd-explore",
+		"sdd-research",
 		"sdd-propose",
 		"sdd-spec",
 		"sdd-design",
@@ -286,7 +290,7 @@ func expandVisualPolishUninstallComponents(components []model.ComponentID) []mod
 	shouldExpand := false
 	visualPolish := model.VisualPolishComponents()
 	for _, component := range components {
-		if slices.Contains(visualPolish, component) {
+		if component != model.ComponentClaudeTheme && slices.Contains(visualPolish, component) {
 			shouldExpand = true
 		}
 	}
@@ -400,6 +404,12 @@ func (s *Service) buildPlan(agentIDs []model.AgentID, componentIDs []model.Compo
 	if slices.Contains(agentIDs, model.AgentPi) {
 		for _, target := range communitytool.PiCodeGraphPaths(s.homeDir, s.workspaceDir) {
 			backupTargets[target] = struct{}{}
+		}
+	}
+	if slices.Contains(agentIDs, model.AgentOpenCode) && removesAllAgentComponents(componentIDs) {
+		for _, path := range opencodeactivation.LauncherPaths(s.homeDir, runtime.GOOS) {
+			backupTargets[path] = struct{}{}
+			operationsByKey[operationKey(removeOwnedOpenCodeLauncher(path))] = removeOwnedOpenCodeLauncher(path)
 		}
 	}
 
@@ -705,10 +715,12 @@ func (s *Service) componentOperations(adapter agents.Adapter, componentID model.
 			ops = append(ops, rewriteJSONFile(path, jsonPath{"theme"}))
 		}
 	case model.ComponentClaudeTheme:
-		if adapter.Agent() == model.AgentClaudeCode {
-			path := filepath.Join(homeDir, ".claude", "themes", "gentleman.json")
+		for _, path := range theme.VisualThemePaths(homeDir, adapter) {
 			targets = append(targets, path)
-			ops = append(ops, removeFile(path), removeDirIfEmpty(filepath.Dir(path)))
+			ops = append(ops, removeFile(path))
+		}
+		if paths := theme.VisualThemePaths(homeDir, adapter); len(paths) > 0 {
+			ops = append(ops, removeDirIfEmpty(filepath.Dir(paths[0])))
 		}
 	case model.ComponentOpenCodeGentleLogo:
 		pluginPath := filepath.Join(homeDir, ".config", "opencode", "tui-plugins", "gentle-logo.tsx")
@@ -756,6 +768,10 @@ func (s *Service) componentOperations(adapter agents.Adapter, componentID model.
 				path := filepath.Join(commandsDir, entry.Name())
 				targets = append(targets, path)
 				ops = append(ops, removeFile(path))
+				if legacy := sdd.LegacyClaudeCommandPath(adapter.Agent(), commandsDir, entry.Name()); legacy != "" {
+					targets = append(targets, legacy)
+					ops = append(ops, removeFile(legacy))
+				}
 			}
 			ops = append(ops, removeDirIfEmpty(commandsDir))
 		}
@@ -798,12 +814,11 @@ func (s *Service) componentOperations(adapter agents.Adapter, componentID model.
 
 			ops = append(ops, rewriteOpenCodeSDDSettings(path, defaultPlan, paths...))
 
-			pluginDir := filepath.Join(homeDir, ".config", "opencode", "plugins")
-			for _, pluginPath := range []string{
-				filepath.Join(pluginDir, "background-agents.ts"),
-				filepath.Join(pluginDir, "model-variants.ts"),
-				filepath.Join(pluginDir, "skill-registry.ts"),
-			} {
+			// The SDD plugin writer resolves the config directory through the
+			// adapter and owns the plugin list; uninstall must match it (#3219).
+			pluginDir := filepath.Join(adapter.GlobalConfigDir(homeDir), "plugins")
+			for _, name := range append([]string{"background-agents.ts"}, sdd.OpenCodePluginLifecycleNames(adapter.Agent())...) {
+				pluginPath := filepath.Join(pluginDir, name)
 				targets = append(targets, pluginPath)
 				ops = append(ops, removeFile(pluginPath))
 			}
@@ -1577,10 +1592,46 @@ func managedSDDSkillIDs() []string {
 	return append(ids, "judgment-day")
 }
 
+func removesAllAgentComponents(componentIDs []model.ComponentID) bool {
+	if len(componentIDs) == 0 {
+		return true
+	}
+	for _, componentID := range fullAgentRemovalComponents {
+		if !slices.Contains(componentIDs, componentID) {
+			return false
+		}
+	}
+	return true
+}
+
 func globalBackupTargets(homeDir string) []string {
 	return []string{
 		gga.ConfigPath(homeDir),
 		gga.AgentsTemplatePath(homeDir),
+	}
+}
+
+func removeOwnedOpenCodeLauncher(path string) operation {
+	return operation{
+		typeID: opRemoveFile,
+		path:   path,
+		agents: []model.AgentID{model.AgentOpenCode},
+		apply: func(path string) (bool, bool, error) {
+			data, err := os.ReadFile(path)
+			if os.IsNotExist(err) {
+				return false, false, nil
+			}
+			if err != nil {
+				return false, false, err
+			}
+			if !bytes.Contains(data, []byte(opencodeactivation.OwnershipMarker)) {
+				return false, false, nil
+			}
+			if err := os.Remove(path); err != nil {
+				return false, false, err
+			}
+			return true, true, nil
+		},
 	}
 }
 
@@ -1630,6 +1681,9 @@ func updateStateAfterUninstall(homeDir string, toRemove []model.AgentID) ([]mode
 
 	updated := current
 	updated.InstalledAgents = kept
+	if slices.Contains(toRemove, model.AgentOpenCode) {
+		updated.BackgroundIntent = ""
+	}
 	if err := state.Write(homeDir, updated); err != nil {
 		return nil, fmt.Errorf("write install state: %w", err)
 	}

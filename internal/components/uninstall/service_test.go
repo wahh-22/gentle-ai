@@ -17,11 +17,80 @@ import (
 	"github.com/gentleman-programming/gentle-ai/v2/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/engram"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/components/sdd"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/theme"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
+	opencodeactivation "github.com/gentleman-programming/gentle-ai/v2/internal/opencode"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/state"
 )
 
 type stubSnapshotter struct{}
+
+func TestBuildPlanRemovesOnlyOwnedOpenCodeLaunchers(t *testing.T) {
+	homeDir := t.TempDir()
+	svc, err := NewService(homeDir, t.TempDir(), "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := opencodeactivation.LauncherPaths(homeDir, runtime.GOOS)
+	ownedPath := paths[0]
+	userPath := filepath.Join(opencodeactivation.BinDir(homeDir), "user-opencode-launcher")
+	for index, path := range []string{ownedPath, userPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := []byte("user launcher")
+		if index == 0 {
+			content = []byte("#!/bin/sh\n# " + opencodeactivation.OwnershipMarker + "\n")
+		}
+		if err := os.WriteFile(path, content, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plan, err := svc.buildPlan([]model.AgentID{model.AgentOpenCode}, allManagedComponents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.executePlan(plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ownedPath); !os.IsNotExist(err) {
+		t.Fatalf("owned launcher stat error = %v, want absent", err)
+	}
+	if data, err := os.ReadFile(userPath); err != nil || string(data) != "user launcher" {
+		t.Fatalf("user launcher = %q, error = %v; want preserved", data, err)
+	}
+	if !slices.Contains(result.RemovedFiles, ownedPath) {
+		t.Fatalf("removed files = %v, want %q", result.RemovedFiles, ownedPath)
+	}
+}
+
+func TestUninstallOpenCodeClearsBackgroundIntent(t *testing.T) {
+	homeDir := t.TempDir()
+	if err := state.Write(homeDir, state.InstallState{
+		InstalledAgents:  []string{"opencode"},
+		BackgroundIntent: model.OpenCodeBackgroundOn,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewService(homeDir, t.TempDir(), "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.snapshotter = stubSnapshotter{}
+	if _, err := svc.PartialUninstall([]model.AgentID{model.AgentOpenCode}, allManagedComponents); err != nil {
+		t.Fatal(err)
+	}
+	got, err := state.Read(homeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BackgroundIntent != "" || len(got.InstalledAgents) != 0 {
+		t.Fatalf("state after uninstall = %#v, want no OpenCode intent or installed agent", got)
+	}
+}
 
 func TestBuildPlanSnapshotsPiManifestAndOwnedOverlay(t *testing.T) {
 	homeDir := t.TempDir()
@@ -200,24 +269,23 @@ func piCodeGraphProbeForServiceTest(string) (communitytool.PiCodeGraphMCPProbeRe
 }
 
 func TestExpandVisualPolishUninstallComponents(t *testing.T) {
-	for _, trigger := range model.VisualPolishComponents() {
-		t.Run(string(trigger), func(t *testing.T) {
-			got := expandVisualPolishUninstallComponents([]model.ComponentID{trigger})
-			for _, want := range model.VisualPolishComponents() {
-				if !slices.Contains(got, want) {
-					t.Fatalf("expanded visual polish components missing %q: %v", want, got)
-				}
+	for _, trigger := range []model.ComponentID{model.ComponentTheme, model.ComponentOpenCodeGentleLogo} {
+		got := expandVisualPolishUninstallComponents([]model.ComponentID{trigger})
+		for _, want := range model.VisualPolishComponents() {
+			if !slices.Contains(got, want) {
+				t.Fatalf("%q expansion missing %q: %v", trigger, want, got)
 			}
-		})
+		}
 	}
-
-	unchanged := expandVisualPolishUninstallComponents([]model.ComponentID{model.ComponentPersona})
-	if !slices.Equal(unchanged, []model.ComponentID{model.ComponentPersona}) {
-		t.Fatalf("non-polish components should not expand: %v", unchanged)
+	for _, component := range []model.ComponentID{model.ComponentClaudeTheme, model.ComponentPersona} {
+		got := expandVisualPolishUninstallComponents([]model.ComponentID{component})
+		if !slices.Equal(got, []model.ComponentID{component}) {
+			t.Fatalf("%q should not expand: %v", component, got)
+		}
 	}
 }
 
-func TestPartialUninstallVisualPolishSelectionRemovesThemeLogoGroup(t *testing.T) {
+func TestPartialUninstallClaudeThemeRemovesOnlyThemeAssets(t *testing.T) {
 	homeDir := t.TempDir()
 	workspaceDir := t.TempDir()
 
@@ -227,51 +295,80 @@ func TestPartialUninstallVisualPolishSelectionRemovesThemeLogoGroup(t *testing.T
 	}
 	svc.snapshotter = stubSnapshotter{}
 
-	// OpenCode's managed theme lives in tui.json (gentleman-midnight overlay),
-	// not the settings path, so the visual-polish uninstall must clean tui.json.
-	tuiPath := filepath.Join(homeDir, ".config", "opencode", "tui.json")
-	if err := os.MkdirAll(filepath.Dir(tuiPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(opencode config dir) error = %v", err)
+	opencodeAdapter, ok := svc.registry.Get(model.AgentOpenCode)
+	if !ok {
+		t.Fatal("opencode adapter not found in registry")
 	}
-	if err := os.WriteFile(tuiPath, []byte(`{"$schema":"https://opencode.ai/tui.json","theme":"gentleman-midnight","keep":true}`), 0o644); err != nil {
-		t.Fatalf("WriteFile(opencode tui.json) error = %v", err)
+	settingsPath := opencodeAdapter.SettingsPath(homeDir)
+	settings := `{"theme":"active","keep":true,"agent":{"sdd-apply":{"model":"keep"}}}`
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	logoPath := filepath.Join(homeDir, ".config", "opencode", "tui-plugins", "gentle-logo.tsx")
 	if err := os.MkdirAll(filepath.Dir(logoPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(logo dir) error = %v", err)
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(logoPath, []byte("// managed logo"), 0o644); err != nil {
-		t.Fatalf("WriteFile(logo) error = %v", err)
+		t.Fatal(err)
 	}
 
-	claudeThemePath := filepath.Join(homeDir, ".claude", "themes", "gentleman.json")
-	if err := os.MkdirAll(filepath.Dir(claudeThemePath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(claude theme dir) error = %v", err)
+	managed := []string{
+		filepath.Join(homeDir, ".claude", "themes", "gentleman.json"),
+		filepath.Join(homeDir, ".claude", "themes", "gentleman-cute.json"),
+		filepath.Join(homeDir, ".config", "opencode", "themes", "gentleman.json"),
+		filepath.Join(homeDir, ".config", "opencode", "themes", "gentleman-cute.json"),
 	}
-	if err := os.WriteFile(claudeThemePath, []byte(`{"name":"gentleman"}`), 0o644); err != nil {
-		t.Fatalf("WriteFile(claude theme) error = %v", err)
+	for _, path := range managed {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"name":"managed"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preserved := map[string]string{
+		filepath.Join(homeDir, ".claude", "settings.json"):                     `{"theme":"active","outputStyle":"gentleman"}`,
+		filepath.Join(homeDir, ".claude", "CLAUDE.md"):                         "# persona\n",
+		filepath.Join(homeDir, ".claude", "output-styles", "gentleman.md"):     "# output style\n",
+		filepath.Join(homeDir, ".claude", "commands", "gentle-sdd-apply.md"):   "# SDD asset\n",
+		filepath.Join(homeDir, ".config", "opencode", "tui.json"):              `{"plugins":["./tui-plugins/gentle-logo.tsx"]}`,
+		filepath.Join(homeDir, ".config", "opencode", "themes", "custom.json"): `{"theme":"custom"}`,
+	}
+	for path, content := range preserved {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if _, err := svc.PartialUninstall(
 		[]model.AgentID{model.AgentOpenCode, model.AgentClaudeCode},
-		[]model.ComponentID{model.ComponentTheme},
+		[]model.ComponentID{model.ComponentClaudeTheme},
 	); err != nil {
 		t.Fatalf("PartialUninstall() error = %v", err)
 	}
 
-	tui := readJSONFileForTest(t, tuiPath)
-	if _, exists := tui["theme"]; exists {
-		t.Fatalf("theme should be removed from OpenCode tui.json: %#v", tui)
+	for _, path := range managed {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("managed theme %q should be removed: %v", path, err)
+		}
 	}
-	if got := tui["keep"]; got != true {
-		t.Fatalf("user setting should be preserved, got %#v", got)
+	for path, want := range preserved {
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Fatalf("preserved asset %q = %q, %v; want %q", path, got, err, want)
+		}
 	}
-	if _, err := os.Stat(logoPath); !os.IsNotExist(err) {
-		t.Fatalf("OpenCode logo should be removed by visual polish group uninstall, err = %v", err)
+	if got, err := os.ReadFile(settingsPath); err != nil || string(got) != settings {
+		t.Fatalf("OpenCode settings = %q, %v; want unchanged %q", got, err, settings)
 	}
-	if _, err := os.Stat(claudeThemePath); !os.IsNotExist(err) {
-		t.Fatalf("Claude theme should be removed by visual polish group uninstall, err = %v", err)
+	if got, err := os.ReadFile(logoPath); err != nil || string(got) != "// managed logo" {
+		t.Fatalf("OpenCode logo = %q, %v", got, err)
 	}
 }
 
@@ -581,6 +678,7 @@ func TestComponentOperationsSDD_RemovesBaseAndProfileAgentsFromSettings(t *testi
 	  "agent": {
 	    "sdd-orchestrator": {"mode": "primary", "model": "anthropic:claude-sonnet-4"},
 	    "sdd-apply": {"mode": "subagent", "model": "anthropic:claude-sonnet-4"},
+	    "sdd-research": {"mode": "subagent", "model": "anthropic:claude-sonnet-4"},
 	    "sdd-onboard": {"mode": "subagent", "model": "anthropic:claude-sonnet-4"},
 	    "sdd-verify": {"mode": "subagent", "model": "anthropic:claude-sonnet-4"},
 	    "sdd-orchestrator-fast": {"mode": "primary", "model": "openai:gpt-4.1-mini"},
@@ -633,6 +731,7 @@ func TestComponentOperationsSDD_RemovesBaseAndProfileAgentsFromSettings(t *testi
 	for _, removedKey := range []string{
 		"sdd-orchestrator",
 		"sdd-apply",
+		"sdd-research",
 		"sdd-onboard",
 		"sdd-verify",
 		"sdd-orchestrator-fast",
@@ -746,7 +845,9 @@ func TestComponentOperationsSDD_ClaudeRemovesManagedCommandFiles(t *testing.T) {
 		t.Fatalf("MkdirAll(commands dir) error = %v", err)
 	}
 
-	managed := []string{"sdd-init.md", "sdd-explore.md", "sdd-onboard.md"}
+	// sdd-init.md is the unprefixed name a pre-#2644 install managed; uninstall
+	// retires it alongside the namespaced commands.
+	managed := []string{"gentle-sdd-init.md", "gentle-sdd-explore.md", "gentle-sdd-onboard.md", "sdd-init.md"}
 	for _, name := range managed {
 		if err := os.WriteFile(filepath.Join(commandsDir, name), []byte(name), 0o644); err != nil {
 			t.Fatalf("WriteFile(%s) error = %v", name, err)
@@ -1467,5 +1568,49 @@ func TestComponentOperationsSDD_CodexRemovesSkillRegistryHook(t *testing.T) {
 	}
 	if !strings.Contains(text, "echo keep") || !strings.Contains(text, "echo pre") {
 		t.Fatalf("unrelated hooks should be preserved:\n%s", text)
+	}
+}
+
+// TestComponentOperationsSDD_OpenCodeRemovesManagedPluginsUnderXDGConfigHome
+// pins #3219 for uninstall: the plugin writer resolves the OpenCode config
+// directory through the adapter, so uninstall must look in the same place.
+func TestComponentOperationsSDD_OpenCodeRemovesManagedPluginsUnderXDGConfigHome(t *testing.T) {
+	homeDir := t.TempDir()
+	xdg := filepath.Join(homeDir, ".xdg")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	svc, err := NewService(homeDir, t.TempDir(), "dev")
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	adapter, ok := svc.registry.Get(model.AgentOpenCode)
+	if !ok {
+		t.Fatal("openCode adapter not found in registry")
+	}
+
+	pluginDir := filepath.Join(xdg, "opencode", "plugins")
+	managed := append([]string{"background-agents.ts"}, sdd.OpenCodePluginLifecycleNames(model.AgentOpenCode)...)
+	for _, name := range managed {
+		path := filepath.Join(pluginDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("managed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	applySDDOpenCodeOperations(t, svc, adapter)
+
+	for _, name := range managed {
+		path := filepath.Join(pluginDir, name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("managed plugin %q should be removed; stat err = %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".config", "opencode")); !os.IsNotExist(err) {
+		t.Fatalf("uninstall touched ~/.config/opencode although XDG_CONFIG_HOME is set (stat err = %v)", err)
 	}
 }

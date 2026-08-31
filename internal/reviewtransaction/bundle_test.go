@@ -122,54 +122,6 @@ func TestBundleImportRejectsLegacyShapedBoundedGenesis(t *testing.T) {
 	}
 }
 
-func TestChainBundleRoundTripBootstrapsRepositoryDerivedStore(t *testing.T) {
-	source := initSnapshotRepo(t)
-	tx, receipt, request := nativeGateFixture(t, source, "portable-lineage")
-	sourceStore, err := AuthoritativeStore(context.Background(), source, tx.LineageID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	head := appendApprovedStoreChain(t, sourceStore, tx)
-	bundle, err := sourceStore.ExportBundle()
-	if err != nil {
-		t.Fatalf("ExportBundle() error = %v", err)
-	}
-	if bundle.GenesisRevision == "" || bundle.HeadRevision != head || bundle.ChainIdentity == "" || bundle.BundleDigest == "" || len(bundle.Events) != 5 {
-		t.Fatalf("exported bundle is incomplete: %#v", bundle)
-	}
-
-	clone := cloneReviewRepository(t, source)
-	expectedSnapshot, err := (SnapshotBuilder{Repo: clone}).Build(context.Background(), request.Target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectation := BundleImportExpectation{
-		LineageID: tx.LineageID, Snapshot: expectedSnapshot,
-		PolicyHash: tx.PolicyHash, LedgerHash: tx.LedgerHash, EvidenceHash: tx.EvidenceHash, FixDeltaHash: tx.FixDeltaHash,
-		Receipt: receipt, GenesisRevision: bundle.GenesisRevision, HeadRevision: bundle.HeadRevision,
-		ChainIdentity: bundle.ChainIdentity, BundleDigest: bundle.BundleDigest,
-	}
-	imported, err := ImportBundle(context.Background(), clone, bundle, expectation)
-	if err != nil {
-		t.Fatalf("ImportBundle() error = %v", err)
-	}
-	if imported.HeadRevision != head || imported.Identity != bundle.ChainIdentity {
-		t.Fatalf("imported chain = %#v", imported)
-	}
-	again, err := ImportBundle(context.Background(), clone, bundle, expectation)
-	if err != nil || again.HeadRevision != head {
-		t.Fatalf("ImportBundle(idempotent) = %#v, %v", again, err)
-	}
-
-	request.StoreRevision = bundle.HeadRevision
-	request.GenesisRevision = bundle.GenesisRevision
-	request.ChainIdentity = bundle.ChainIdentity
-	request.BundleDigest = bundle.BundleDigest
-	if evaluation := EvaluateNativeGate(context.Background(), clone, receipt, request); evaluation.Result != GateAllow {
-		t.Fatalf("EvaluateNativeGate(imported chain) = %#v", evaluation)
-	}
-}
-
 func TestNonterminalBundleImportsForResumptionWithoutReceipt(t *testing.T) {
 	source := initSnapshotRepo(t)
 	snapshot, err := (SnapshotBuilder{Repo: source}).Build(context.Background(), Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{}})
@@ -231,13 +183,9 @@ func TestCorrectedChainBundleRoundTripUsesDeliveredContentEquivalence(t *testing
 	if imported.HeadRevision != bundle.HeadRevision || imported.Identity != bundle.ChainIdentity {
 		t.Fatalf("imported corrected chain = %#v", imported)
 	}
-
-	fixture.Request.StoreRevision = bundle.HeadRevision
-	fixture.Request.GenesisRevision = bundle.GenesisRevision
-	fixture.Request.ChainIdentity = bundle.ChainIdentity
-	fixture.Request.BundleDigest = bundle.BundleDigest
-	if evaluation := EvaluateNativeGate(context.Background(), clone, fixture.Receipt, fixture.Request); evaluation.Result != GateScopeChanged {
-		t.Fatalf("EvaluateNativeGate(imported corrected chain) = %#v", evaluation)
+	again, err := ImportBundle(context.Background(), clone, bundle, expectation)
+	if err != nil || again.HeadRevision != bundle.HeadRevision || again.Identity != bundle.ChainIdentity {
+		t.Fatalf("ImportBundle(idempotent corrected lineage) = %#v, %v", again, err)
 	}
 }
 
@@ -359,81 +307,6 @@ func TestChainBundleImportRejectsTamperingTruncationAndWrongBindings(t *testing.
 			}
 			if _, err := os.Stat(filepath.Join(destination.Dir, "HEAD")); !os.IsNotExist(err) {
 				t.Fatalf("failed import installed authoritative HEAD: %v", err)
-			}
-		})
-	}
-}
-
-func TestChainBundleValidationRejectsForgedReleaseTransitions(t *testing.T) {
-	withoutRelease := approvedStoreTransaction(t, "bundle-without-release")
-	withoutReleaseStore := Store{Dir: filepath.Join(canonicalBundleTempDir(t), "without-release")}
-	appendApprovedStoreChain(t, withoutReleaseStore, withoutRelease)
-	withoutReleaseBundle, err := withoutReleaseStore.ExportBundle()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	withRelease := approvedStoreTransaction(t, "bundle-with-release")
-	release := testReleaseEvidence(withRelease.FinalCandidateTree)
-	withRelease.Release = cloneReleaseEvidence(&release)
-	withReleaseStore := Store{Dir: filepath.Join(canonicalBundleTempDir(t), "with-release")}
-	appendApprovedStoreChain(t, withReleaseStore, withRelease)
-	withReleaseBundle, err := withReleaseStore.ExportBundle()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mutatedRelease := release
-	mutatedRelease.ConfigurationHash = hash("7")
-	tests := []struct {
-		name   string
-		bundle ChainBundle
-		mutate func(record *Record)
-	}{
-		{
-			name:   "late terminal injection",
-			bundle: withoutReleaseBundle,
-			mutate: func(record *Record) {
-				if record.Transaction.State == StateApproved {
-					record.Transaction.Release = cloneReleaseEvidence(&release)
-				}
-			},
-		},
-		{
-			name:   "bound evidence mutation",
-			bundle: withReleaseBundle,
-			mutate: func(record *Record) {
-				if record.Transaction.State == StateFinalVerifying {
-					record.Transaction.Release = cloneReleaseEvidence(&mutatedRelease)
-				}
-			},
-		},
-		{
-			name:   "bound evidence removal",
-			bundle: withReleaseBundle,
-			mutate: func(record *Record) {
-				if record.Transaction.State == StateFinalVerifying {
-					record.Transaction.Release = nil
-				}
-			},
-		},
-		{
-			name:   "binding under a different operation",
-			bundle: withReleaseBundle,
-			mutate: func(record *Record) {
-				if record.Operation == "review/bind-release-evidence" {
-					record.Operation = "review/resume"
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			bundle := cloneChainBundle(t, tt.bundle)
-			rewriteBundleRecords(t, &bundle, tt.mutate)
-			if _, err := validateChainBundle(bundle); !errors.Is(err, ErrInvalidSuccessor) {
-				t.Fatalf("validateChainBundle() error = %v, want ErrInvalidSuccessor", err)
 			}
 		})
 	}

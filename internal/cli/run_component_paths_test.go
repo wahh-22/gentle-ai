@@ -72,7 +72,7 @@ func TestComponentPathsSDDMultiIncludesOpenCodePlugins(t *testing.T) {
 
 	paths := componentPaths(home, model.Selection{SDDMode: model.SDDModeMulti}, adapters, model.ComponentSDD)
 
-	for _, plugin := range []string{"background-agents.ts", "model-variants.ts", "review-result-artifacts.ts", "skill-registry.ts"} {
+	for _, plugin := range []string{"background-agents.ts", "model-variants.ts", "opencode-review-transport.ts", "sdd-task-result-artifacts.ts", "skill-registry.ts"} {
 		path := filepath.Join(home, ".config", "opencode", "plugins", plugin)
 		if !containsPath(paths, path) {
 			t.Fatalf("componentPaths(sdd multi) missing OpenCode plugin path %q\npaths=%v", path, paths)
@@ -110,7 +110,7 @@ func TestComponentPathsSDDSingleIncludesOpenCodePlugins(t *testing.T) {
 
 	paths := componentPaths(home, model.Selection{SDDMode: model.SDDModeSingle}, adapters, model.ComponentSDD)
 
-	for _, plugin := range []string{"background-agents.ts", "model-variants.ts", "review-result-artifacts.ts", "skill-registry.ts"} {
+	for _, plugin := range []string{"background-agents.ts", "model-variants.ts", "opencode-review-transport.ts", "sdd-task-result-artifacts.ts", "skill-registry.ts"} {
 		path := filepath.Join(home, ".config", "opencode", "plugins", plugin)
 		if !containsPath(paths, path) {
 			t.Fatalf("componentPaths(sdd single) missing OpenCode plugin path %q\npaths=%v", path, paths)
@@ -131,6 +131,8 @@ func TestComponentPathsWorkspaceScopedOpenCodeSDDUsesWorkspaceManagedPaths(t *te
 		filepath.Join(workspace, ".config", "opencode", "commands", "sdd-init.md"),
 		filepath.Join(workspace, ".config", "opencode", "plugins", "background-agents.ts"),
 		filepath.Join(workspace, ".config", "opencode", "plugins", "model-variants.ts"),
+		filepath.Join(workspace, ".config", "opencode", "plugins", "opencode-review-transport.ts"),
+		filepath.Join(workspace, ".config", "opencode", "plugins", "sdd-task-result-artifacts.ts"),
 		filepath.Join(workspace, ".config", "opencode", "plugins", "skill-registry.ts"),
 		filepath.Join(workspace, ".config", "opencode", "prompts", "sdd", "sdd-apply.md"),
 		filepath.Join(workspace, ".config", "opencode", "skills", "sdd-apply", "SKILL.md"),
@@ -225,6 +227,31 @@ func TestInstallPiPersonaWritesManagedScopePaths(t *testing.T) {
 			unwanted := filepath.Join(other, ".pi", "gentle-ai", "persona.json")
 			if _, err := os.Stat(unwanted); !os.IsNotExist(err) {
 				t.Fatalf("workspace-scoped Pi persona config %q was written outside scope; stat err = %v", unwanted, err)
+			}
+		})
+	}
+}
+
+// Issue #3219: a home installed with XDG_CONFIG_HOME keeps the legacy plugin
+// under $XDG_CONFIG_HOME/opencode/plugins, and the ~/.config form stays legacy
+// while XDG is set; the classification depends on the path and XDG alone.
+func TestLegacyOpenCodeBackgroundAgentsPluginUnderXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	for _, tt := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "legacy plugin under XDG opencode config", path: filepath.Join(xdg, "opencode", "plugins", "background-agents.ts"), want: true},
+		{name: "legacy plugin under ~/.config while XDG is set", path: filepath.Join(home, ".config", "opencode", "plugins", "background-agents.ts"), want: true},
+		{name: "same file under unrelated opencode directory", path: filepath.Join(home, "opencode", "plugins", "background-agents.ts"), want: false},
+		{name: "managed replacement plugin under XDG is not legacy", path: filepath.Join(xdg, "opencode", "plugins", "model-variants.ts"), want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLegacyOpenCodeBackgroundAgentsPlugin(tt.path); got != tt.want {
+				t.Fatalf("isLegacyOpenCodeBackgroundAgentsPlugin(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
 	}
@@ -546,6 +573,21 @@ func TestComponentPathsEngramCodexIncludesConfigTOML(t *testing.T) {
 	want := filepath.Join(home, ".codex", "config.toml")
 	if !containsPath(paths, want) {
 		t.Fatalf("componentPaths(engram,codex) missing %q\npaths=%v", want, paths)
+	}
+}
+
+func TestComponentPathsSDDCodexIncludesHooksJSONOnlyForCodex(t *testing.T) {
+	home := t.TempDir()
+	adapters := resolveAdapters([]model.AgentID{model.AgentCodex, model.AgentClaudeCode})
+
+	paths := componentPaths(home, model.Selection{}, adapters, model.ComponentSDD)
+	codexHooks := filepath.Join(home, ".codex", "hooks.json")
+	if !containsPath(paths, codexHooks) {
+		t.Fatalf("componentPaths(sdd,codex) missing skill-registry hook %q\npaths=%v", codexHooks, paths)
+	}
+	claudeHooks := filepath.Join(home, ".claude", "hooks.json")
+	if containsPath(paths, claudeHooks) {
+		t.Fatalf("componentPaths(sdd,claude) declared unsupported hooks path %q\npaths=%v", claudeHooks, paths)
 	}
 }
 
@@ -1096,6 +1138,27 @@ func TestBackupTargetsClaudeContext7IncludeCleanupWithoutVerificationRequirement
 				t.Fatalf("backupTargets selected the wrong scope's cleanup path; targets=%v", targets)
 			}
 		})
+	}
+}
+
+func TestComponentPathsVisualThemesMatchSelectedAdapter(t *testing.T) {
+	home := t.TempDir()
+	for _, tt := range []struct {
+		agent model.AgentID
+		want  []string
+	}{
+		{model.AgentClaudeCode, []string{filepath.Join(home, ".claude", "themes", "gentleman.json"), filepath.Join(home, ".claude", "themes", "gentleman-cute.json")}},
+		{model.AgentOpenCode, []string{filepath.Join(home, ".config", "opencode", "themes", "gentleman.json"), filepath.Join(home, ".config", "opencode", "themes", "gentleman-cute.json")}},
+	} {
+		paths := componentPaths(home, model.Selection{}, resolveAdapters([]model.AgentID{tt.agent}), model.ComponentClaudeTheme)
+		if len(paths) != len(tt.want) {
+			t.Fatalf("%q paths = %v, want %v", tt.agent, paths, tt.want)
+		}
+		for i := range tt.want {
+			if paths[i] != tt.want[i] {
+				t.Fatalf("%q paths = %v, want %v", tt.agent, paths, tt.want)
+			}
+		}
 	}
 }
 
