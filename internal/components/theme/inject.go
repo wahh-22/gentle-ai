@@ -73,6 +73,17 @@ var gentlemanCuteClaudeTheme = claudeTheme{
 	),
 }
 
+var gentlemanBlueClaudeTheme = claudeTheme{
+	Name: "Gentleman Blue", Base: "dark",
+	Overrides: palette(
+		"claude", "#347AFF", "claudeShimmer", "#5CE1FF", "text", "#DBE9FF", "inactive", "#4A5578", "subtle", "#1C2C54", "suggestion", "#5CE1FF",
+		"permission", "#7C5CFF", "promptBorder", "#347AFF", "planMode", "#5CE1FF", "autoAccept", "#4DFF88", "bashBorder", "#FF9F1C",
+		"remember", "#FFD23D", "success", "#4DFF88", "merged", "#4DFF88", "error", "#FF3D81", "warning", "#FFD23D",
+		"diffAdded", "#070B1A", "diffRemoved", "#070B1A", "diffAddedWord", "#4DFF88", "diffRemovedWord", "#FF3D81",
+		"userMessageBackground", "#070B1A", "userMessageBackgroundHover", "#1C2C54", "selectionBg", "#1C2C54", "memoryBackgroundColor", "#05070F", "bashMessageBackgroundColor", "#070B1A",
+	),
+}
+
 var gentlemanOpenCodeTheme = openCodeTheme{
 	Schema: openCodeThemeSchema,
 	Theme: palette(
@@ -98,6 +109,20 @@ var gentlemanCuteOpenCodeTheme = openCodeTheme{
 		"markdownLink", "#F095C8", "markdownLinkText", "#F095C8", "markdownCode", "#E0C27A", "markdownBlockQuote", "#A78E9B", "markdownEmph", "#D7A0B8", "markdownStrong", "#E0C27A",
 		"markdownHorizontalRule", "#A78E9B", "markdownListItem", "#F095C8", "markdownListEnumeration", "#D7A0B8", "markdownImage", "#F095C8", "markdownImageText", "#F095C8", "markdownCodeBlock", "#F6EFF3",
 		"syntaxComment", "#A78E9B", "syntaxKeyword", "#F095C8", "syntaxFunction", "#A9C7EE", "syntaxVariable", "#F6EFF3", "syntaxString", "#B4E7C7", "syntaxNumber", "#F2B86D", "syntaxType", "#E0C27A", "syntaxOperator", "#C4DAF6", "syntaxPunctuation", "#A78E9B",
+	),
+}
+
+var gentlemanBlueOpenCodeTheme = openCodeTheme{
+	Schema: openCodeThemeSchema,
+	Theme: palette(
+		"background", "#05070F", "backgroundPanel", "#070B1A", "backgroundElement", "#070B1A", "text", "#DBE9FF", "textMuted", "#4A5578",
+		"primary", "#347AFF", "secondary", "#7C5CFF", "accent", "#5CE1FF", "error", "#FF3D81", "warning", "#FFD23D", "success", "#4DFF88", "info", "#5CE1FF",
+		"border", "#1C2C54", "borderActive", "#347AFF", "borderSubtle", "#070B1A", "diffAdded", "#4DFF88", "diffRemoved", "#FF3D81", "diffContext", "#4A5578",
+		"diffHunkHeader", "#5CE1FF", "diffHighlightAdded", "#4DFF88", "diffHighlightRemoved", "#FF3D81", "diffAddedBg", "#070B1A", "diffRemovedBg", "#070B1A", "diffContextBg", "#05070F",
+		"diffLineNumber", "#4A5578", "diffAddedLineNumberBg", "#070B1A", "diffRemovedLineNumberBg", "#070B1A", "markdownText", "#DBE9FF", "markdownHeading", "#7C5CFF",
+		"markdownLink", "#347AFF", "markdownLinkText", "#5CE1FF", "markdownCode", "#4DFF88", "markdownBlockQuote", "#4A5578", "markdownEmph", "#5CE1FF", "markdownStrong", "#FFD23D",
+		"markdownHorizontalRule", "#1C2C54", "markdownListItem", "#347AFF", "markdownListEnumeration", "#7C5CFF", "markdownImage", "#347AFF", "markdownImageText", "#5CE1FF", "markdownCodeBlock", "#DBE9FF",
+		"syntaxComment", "#4A5578", "syntaxKeyword", "#7C5CFF", "syntaxFunction", "#347AFF", "syntaxVariable", "#DBE9FF", "syntaxString", "#4DFF88", "syntaxNumber", "#FF9F1C", "syntaxType", "#5CE1FF", "syntaxOperator", "#FFD23D", "syntaxPunctuation", "#4A5578",
 	),
 }
 
@@ -151,9 +176,9 @@ func InjectVisualThemes(homeDir string, adapter agents.Adapter) (InjectionResult
 	var values []any
 	switch adapter.Agent() {
 	case model.AgentClaudeCode:
-		values = []any{gentlemanClaudeTheme, gentlemanCuteClaudeTheme}
+		values = []any{gentlemanClaudeTheme, gentlemanCuteClaudeTheme, gentlemanBlueClaudeTheme}
 	case model.AgentOpenCode:
-		values = []any{gentlemanOpenCodeTheme, gentlemanCuteOpenCodeTheme}
+		values = []any{gentlemanOpenCodeTheme, gentlemanCuteOpenCodeTheme, gentlemanBlueOpenCodeTheme}
 	}
 
 	result := InjectionResult{Files: make([]string, 0, len(paths))}
@@ -184,7 +209,11 @@ func VisualThemePaths(homeDir string, adapter agents.Adapter) []string {
 	default:
 		return nil
 	}
-	return []string{filepath.Join(root, "gentleman.json"), filepath.Join(root, "gentleman-cute.json")}
+	return []string{
+		filepath.Join(root, "gentleman.json"),
+		filepath.Join(root, "gentleman-cute.json"),
+		filepath.Join(root, "gentleman-blue.json"),
+	}
 }
 
 func mergeJSONFile(path string, overlay []byte) (filemerge.WriteResult, error) {

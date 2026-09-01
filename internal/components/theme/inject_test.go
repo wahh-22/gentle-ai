@@ -187,9 +187,21 @@ func TestInjectVisualThemesIsIdempotentForClaude(t *testing.T) {
 		t.Fatalf("InjectVisualThemes() second changed = true")
 	}
 
-	path := filepath.Join(home, ".claude", "themes", "gentleman.json")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected Claude theme file %q: %v", path, err)
+	wantFiles := []string{
+		filepath.Join(home, ".claude", "themes", "gentleman.json"),
+		filepath.Join(home, ".claude", "themes", "gentleman-cute.json"),
+		filepath.Join(home, ".claude", "themes", "gentleman-blue.json"),
+	}
+	if len(first.Files) != len(wantFiles) {
+		t.Fatalf("files = %#v, want %#v", first.Files, wantFiles)
+	}
+	for i, path := range wantFiles {
+		if first.Files[i] != path {
+			t.Fatalf("files[%d] = %q, want %q", i, first.Files[i], path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected Claude theme file %q: %v", path, err)
+		}
 	}
 }
 
@@ -218,8 +230,8 @@ func TestInjectVisualThemesPreservesGentlemanClaudeTheme(t *testing.T) {
 	}
 
 	themePath := filepath.Join(home, ".claude", "themes", "gentleman.json")
-	if len(result.Files) != 2 || result.Files[0] != themePath {
-		t.Fatalf("files = %#v, want Gentleman first at %q", result.Files, themePath)
+	if len(result.Files) != 3 || result.Files[0] != themePath {
+		t.Fatalf("files = %#v, want three themes with Gentleman first at %q", result.Files, themePath)
 	}
 
 	data, err := os.ReadFile(themePath)
@@ -306,10 +318,54 @@ func TestInjectVisualThemesWritesExpectedAssets(t *testing.T) {
 			t.Fatalf("%s bytes mismatch: %v", tt.path, err)
 		}
 	}
+
+	blueClaudePath := filepath.Join(home, ".claude", "themes", "gentleman-blue.json")
+	blueClaudeData, err := os.ReadFile(blueClaudePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", blueClaudePath, err)
+	}
+	var blueClaude claudeTheme
+	if err := json.Unmarshal(blueClaudeData, &blueClaude); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", blueClaudePath, err)
+	}
+	if blueClaude.Name != "Gentleman Blue" || blueClaude.Base != "dark" {
+		t.Fatalf("blue Claude identity = %q/%q, want Gentleman Blue/dark", blueClaude.Name, blueClaude.Base)
+	}
+	assertPaletteValues(t, blueClaude.Overrides, map[string]string{
+		"claude": "#347AFF", "text": "#DBE9FF", "success": "#4DFF88", "error": "#FF3D81", "warning": "#FFD23D",
+		"diffAddedWord": "#4DFF88", "diffRemovedWord": "#FF3D81", "userMessageBackground": "#070B1A", "memoryBackgroundColor": "#05070F",
+	})
+
+	blueOpenCodePath := filepath.Join(xdg, "opencode", "themes", "gentleman-blue.json")
+	blueOpenCodeData, err := os.ReadFile(blueOpenCodePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", blueOpenCodePath, err)
+	}
+	var blueOpenCode openCodeTheme
+	if err := json.Unmarshal(blueOpenCodeData, &blueOpenCode); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", blueOpenCodePath, err)
+	}
+	if blueOpenCode.Schema != openCodeThemeSchema {
+		t.Fatalf("blue OpenCode schema = %q, want %q", blueOpenCode.Schema, openCodeThemeSchema)
+	}
+	assertPaletteValues(t, blueOpenCode.Theme, map[string]string{
+		"background": "#05070F", "backgroundPanel": "#070B1A", "text": "#DBE9FF", "primary": "#347AFF", "info": "#5CE1FF",
+		"success": "#4DFF88", "error": "#FF3D81", "warning": "#FFD23D", "syntaxKeyword": "#7C5CFF", "syntaxNumber": "#FF9F1C", "border": "#1C2C54",
+	})
+
 	cute := gentlemanCuteClaudeTheme
 	for _, key := range []string{"background", "backgroundFullscreen", "backgroundUser", "backgroundHover", "backgroundSelection", "backgroundMemory", "backgroundBash", "shimmer"} {
 		if _, exists := cute.Overrides[key]; exists {
 			t.Fatalf("Claude Cute contains invalid override %q", key)
+		}
+	}
+}
+
+func assertPaletteValues(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("palette[%q] = %q, want %q", key, got[key], value)
 		}
 	}
 }
