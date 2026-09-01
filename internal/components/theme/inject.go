@@ -44,7 +44,23 @@ type openCodeTheme struct {
 	Theme  map[string]string `json:"theme"`
 }
 
+type piTheme struct {
+	Schema string            `json:"$schema"`
+	Name   string            `json:"name"`
+	Vars   map[string]string `json:"vars"`
+	Colors map[string]string `json:"colors"`
+	Export piThemeExport     `json:"export"`
+}
+
+type piThemeExport struct {
+	PageBackground string `json:"pageBg"`
+	CardBackground string `json:"cardBg"`
+	InfoBackground string `json:"infoBg"`
+}
+
 const openCodeThemeSchema = "https://opencode.ai/theme.json"
+
+const piThemeSchema = "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json"
 
 func palette(pairs ...string) map[string]string {
 	colors := make(map[string]string, len(pairs)/2)
@@ -126,6 +142,35 @@ var gentlemanBlueOpenCodeTheme = openCodeTheme{
 	),
 }
 
+var gentlemanBluePiTheme = piTheme{
+	Schema: piThemeSchema,
+	Name:   "gentleman-blue",
+	Vars: palette(
+		"background", "#05070F", "surface", "#070B1A", "primary", "#347AFF", "foreground", "#DBE9FF",
+		"cyan", "#5CE1FF", "violet", "#7C5CFF", "green", "#4DFF88", "red", "#FF3D81",
+		"yellow", "#FFD23D", "orange", "#FF9F1C", "border", "#1C2C54", "muted", "#4A5578",
+	),
+	Colors: palette(
+		"accent", "primary", "border", "border", "borderAccent", "cyan", "borderMuted", "border",
+		"success", "green", "error", "red", "warning", "yellow", "muted", "muted", "dim", "border", "text", "foreground", "thinkingText", "violet",
+		"selectedBg", "border", "scrollbarThumb", "border", "searchMatchBg", "yellow", "searchMatchText", "background",
+		"userMessageBg", "surface", "userMessageText", "foreground", "customMessageBg", "surface", "customMessageText", "foreground", "customMessageLabel", "cyan",
+		"toolPendingBg", "surface", "toolSuccessBg", "surface", "toolErrorBg", "surface", "toolTitle", "primary", "toolOutput", "foreground",
+		"mdHeading", "violet", "mdLink", "cyan", "mdLinkUrl", "muted", "mdCode", "green", "mdCodeBlock", "foreground",
+		"mdCodeBlockBorder", "border", "mdQuote", "muted", "mdQuoteBorder", "border", "mdHr", "border", "mdListBullet", "cyan",
+		"toolDiffAdded", "green", "toolDiffRemoved", "red", "toolDiffContext", "muted",
+		"syntaxComment", "muted", "syntaxKeyword", "violet", "syntaxFunction", "primary", "syntaxVariable", "foreground", "syntaxString", "green",
+		"syntaxNumber", "orange", "syntaxType", "violet", "syntaxOperator", "yellow", "syntaxPunctuation", "muted",
+		"thinkingOff", "muted", "thinkingMinimal", "border", "thinkingLow", "primary", "thinkingMedium", "cyan", "thinkingHigh", "violet", "thinkingXhigh", "orange", "thinkingMax", "red",
+		"bashMode", "orange",
+	),
+	Export: piThemeExport{
+		PageBackground: "background",
+		CardBackground: "surface",
+		InfoBackground: "border",
+	},
+}
+
 func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 	if adapter.Agent() == model.AgentOpenCode {
 		return injectOpenCodeTheme(homeDir)
@@ -179,6 +224,8 @@ func InjectVisualThemes(homeDir string, adapter agents.Adapter) (InjectionResult
 		values = []any{gentlemanClaudeTheme, gentlemanCuteClaudeTheme, gentlemanBlueClaudeTheme}
 	case model.AgentOpenCode:
 		values = []any{gentlemanOpenCodeTheme, gentlemanCuteOpenCodeTheme, gentlemanBlueOpenCodeTheme}
+	case model.AgentPi:
+		values = []any{gentlemanBluePiTheme}
 	}
 
 	result := InjectionResult{Files: make([]string, 0, len(paths))}
@@ -206,6 +253,8 @@ func VisualThemePaths(homeDir string, adapter agents.Adapter) []string {
 		root = filepath.Join(adapter.GlobalConfigDir(homeDir), "themes")
 	case model.AgentOpenCode:
 		root = filepath.Join(filepath.Dir(adapter.SettingsPath(homeDir)), "themes")
+	case model.AgentPi:
+		return []string{filepath.Join(filepath.Dir(adapter.SettingsPath(homeDir)), "themes", "gentleman-blue.json")}
 	default:
 		return nil
 	}

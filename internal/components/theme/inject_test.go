@@ -10,11 +10,13 @@ import (
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/opencode"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/pi"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
 )
 
 func claudeAdapter() agents.Adapter   { return claude.NewAdapter() }
 func opencodeAdapter() agents.Adapter { return opencode.NewAdapter() }
+func piAdapter() agents.Adapter       { return pi.NewAdapter() }
 
 func TestInjectMergesThemeOverlayIntoAdapterSettings(t *testing.T) {
 	home := t.TempDir()
@@ -202,6 +204,93 @@ func TestInjectVisualThemesIsIdempotentForClaude(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected Claude theme file %q: %v", path, err)
 		}
+	}
+}
+
+func TestInjectVisualThemesWritesOnlyUnselectedGentlemanBlueForPi(t *testing.T) {
+	home := t.TempDir()
+	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(settings dir) error = %v", err)
+	}
+	settings := []byte("{\n  \"theme\": \"user-selected\",\n  \"packages\": [\"npm:existing\"]\n}\n")
+	if err := os.WriteFile(settingsPath, settings, 0o644); err != nil {
+		t.Fatalf("WriteFile(settings) error = %v", err)
+	}
+
+	first, err := InjectVisualThemes(home, piAdapter())
+	if err != nil {
+		t.Fatalf("InjectVisualThemes() first error = %v", err)
+	}
+	if !first.Changed {
+		t.Fatalf("InjectVisualThemes() first changed = false")
+	}
+	second, err := InjectVisualThemes(home, piAdapter())
+	if err != nil {
+		t.Fatalf("InjectVisualThemes() second error = %v", err)
+	}
+	if second.Changed {
+		t.Fatalf("InjectVisualThemes() second changed = true")
+	}
+
+	themePath := filepath.Join(home, ".pi", "agent", "themes", "gentleman-blue.json")
+	if len(first.Files) != 1 || first.Files[0] != themePath {
+		t.Fatalf("files = %#v, want only %q", first.Files, themePath)
+	}
+	for _, unwanted := range []string{"gentleman.json", "gentleman-cute.json"} {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(themePath), unwanted)); !os.IsNotExist(err) {
+			t.Fatalf("unexpected Pi theme %q; stat error = %v", unwanted, err)
+		}
+	}
+	if got, err := os.ReadFile(settingsPath); err != nil || !bytes.Equal(got, settings) {
+		t.Fatalf("Pi settings changed = %q, %v", got, err)
+	}
+
+	data, err := os.ReadFile(themePath)
+	if err != nil {
+		t.Fatalf("ReadFile(theme) error = %v", err)
+	}
+	var theme piTheme
+	if err := json.Unmarshal(data, &theme); err != nil {
+		t.Fatalf("Unmarshal(theme) error = %v", err)
+	}
+	if theme.Schema != piThemeSchema || theme.Name != "gentleman-blue" {
+		t.Fatalf("Pi theme identity = %q/%q, want %q/gentleman-blue", theme.Schema, theme.Name, piThemeSchema)
+	}
+	assertPaletteValues(t, theme.Vars, map[string]string{
+		"background": "#05070F", "surface": "#070B1A", "primary": "#347AFF", "foreground": "#DBE9FF",
+		"cyan": "#5CE1FF", "violet": "#7C5CFF", "green": "#4DFF88", "red": "#FF3D81",
+		"yellow": "#FFD23D", "orange": "#FF9F1C", "border": "#1C2C54", "muted": "#4A5578",
+	})
+	requiredTokens := []string{
+		"accent", "border", "borderAccent", "borderMuted", "success", "error", "warning", "muted", "dim", "text", "thinkingText",
+		"selectedBg", "userMessageBg", "userMessageText", "customMessageBg", "customMessageText", "customMessageLabel",
+		"toolPendingBg", "toolSuccessBg", "toolErrorBg", "toolTitle", "toolOutput",
+		"mdHeading", "mdLink", "mdLinkUrl", "mdCode", "mdCodeBlock", "mdCodeBlockBorder", "mdQuote", "mdQuoteBorder", "mdHr", "mdListBullet",
+		"toolDiffAdded", "toolDiffRemoved", "toolDiffContext",
+		"syntaxComment", "syntaxKeyword", "syntaxFunction", "syntaxVariable", "syntaxString", "syntaxNumber", "syntaxType", "syntaxOperator", "syntaxPunctuation",
+		"thinkingOff", "thinkingMinimal", "thinkingLow", "thinkingMedium", "thinkingHigh", "thinkingXhigh", "bashMode",
+	}
+	for _, token := range requiredTokens {
+		if _, ok := theme.Colors[token]; !ok {
+			t.Errorf("Pi theme missing required color token %q", token)
+		}
+	}
+	for _, token := range []string{"scrollbarThumb", "searchMatchBg", "searchMatchText", "thinkingMax"} {
+		if _, ok := theme.Colors[token]; !ok {
+			t.Errorf("Pi theme missing explicit fallback color token %q", token)
+		}
+	}
+	if len(theme.Colors) != len(requiredTokens)+4 {
+		t.Fatalf("Pi color token count = %d, want %d required and explicit fallback tokens", len(theme.Colors), len(requiredTokens)+4)
+	}
+	assertPaletteValues(t, theme.Colors, map[string]string{
+		"text": "foreground", "accent": "primary", "mdLink": "cyan", "thinkingText": "violet", "thinkingHigh": "violet",
+		"success": "green", "toolDiffAdded": "green", "error": "red", "toolDiffRemoved": "red", "warning": "yellow",
+		"bashMode": "orange", "border": "border", "muted": "muted", "userMessageBg": "surface", "syntaxType": "violet",
+	})
+	if theme.Export.PageBackground != "background" || theme.Export.CardBackground != "surface" || theme.Export.InfoBackground != "border" {
+		t.Fatalf("Pi export colors = %#v, want background/surface/border", theme.Export)
 	}
 }
 
