@@ -146,7 +146,7 @@ var gentlemanBluePiTheme = piTheme{
 	Schema: piThemeSchema,
 	Name:   "gentleman-blue",
 	Vars: palette(
-		"background", "#05070F", "surface", "#070B1A", "primary", "#347AFF", "foreground", "#DBE9FF",
+		"background", "#05070F", "surface", "#070B1A", "userSurface", "#10182E", "primary", "#347AFF", "foreground", "#DBE9FF",
 		"cyan", "#5CE1FF", "violet", "#7C5CFF", "green", "#4DFF88", "red", "#FF3D81",
 		"yellow", "#FFD23D", "orange", "#FF9F1C", "border", "#1C2C54", "muted", "#4A5578",
 	),
@@ -154,7 +154,7 @@ var gentlemanBluePiTheme = piTheme{
 		"accent", "primary", "border", "border", "borderAccent", "cyan", "borderMuted", "border",
 		"success", "green", "error", "red", "warning", "yellow", "muted", "muted", "dim", "border", "text", "foreground", "thinkingText", "violet",
 		"selectedBg", "border", "scrollbarThumb", "border", "searchMatchBg", "yellow", "searchMatchText", "background",
-		"userMessageBg", "surface", "userMessageText", "foreground", "customMessageBg", "surface", "customMessageText", "foreground", "customMessageLabel", "cyan",
+		"userMessageBg", "userSurface", "userMessageText", "foreground", "customMessageBg", "surface", "customMessageText", "foreground", "customMessageLabel", "cyan",
 		"toolPendingBg", "surface", "toolSuccessBg", "surface", "toolErrorBg", "surface", "toolTitle", "primary", "toolOutput", "foreground",
 		"mdHeading", "violet", "mdLink", "cyan", "mdLinkUrl", "muted", "mdCode", "green", "mdCodeBlock", "foreground",
 		"mdCodeBlockBorder", "border", "mdQuote", "muted", "mdQuoteBorder", "border", "mdHr", "border", "mdListBullet", "cyan",

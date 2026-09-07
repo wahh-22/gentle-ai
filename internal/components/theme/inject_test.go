@@ -258,7 +258,7 @@ func TestInjectVisualThemesWritesOnlyUnselectedGentlemanBlueForPi(t *testing.T) 
 		t.Fatalf("Pi theme identity = %q/%q, want %q/gentleman-blue", theme.Schema, theme.Name, piThemeSchema)
 	}
 	assertPaletteValues(t, theme.Vars, map[string]string{
-		"background": "#05070F", "surface": "#070B1A", "primary": "#347AFF", "foreground": "#DBE9FF",
+		"background": "#05070F", "surface": "#070B1A", "userSurface": "#10182E", "primary": "#347AFF", "foreground": "#DBE9FF",
 		"cyan": "#5CE1FF", "violet": "#7C5CFF", "green": "#4DFF88", "red": "#FF3D81",
 		"yellow": "#FFD23D", "orange": "#FF9F1C", "border": "#1C2C54", "muted": "#4A5578",
 	})
@@ -287,7 +287,8 @@ func TestInjectVisualThemesWritesOnlyUnselectedGentlemanBlueForPi(t *testing.T) 
 	assertPaletteValues(t, theme.Colors, map[string]string{
 		"text": "foreground", "accent": "primary", "mdLink": "cyan", "thinkingText": "violet", "thinkingHigh": "violet",
 		"success": "green", "toolDiffAdded": "green", "error": "red", "toolDiffRemoved": "red", "warning": "yellow",
-		"bashMode": "orange", "border": "border", "muted": "muted", "userMessageBg": "surface", "syntaxType": "violet",
+		"bashMode": "orange", "border": "border", "muted": "muted", "userMessageBg": "userSurface", "customMessageBg": "surface",
+		"toolPendingBg": "surface", "toolSuccessBg": "surface", "toolErrorBg": "surface", "syntaxType": "violet",
 	})
 	if theme.Export.PageBackground != "background" || theme.Export.CardBackground != "surface" || theme.Export.InfoBackground != "border" {
 		t.Fatalf("Pi export colors = %#v, want background/surface/border", theme.Export)
