@@ -31,6 +31,7 @@ func journeySources() []journeySource {
 		{"journeys_issue3094.go", issue3094Journeys()},
 		{"journeys_issue_3065.go", issue3065Journeys()},
 		{"journeys_handoff.go", handoffJourneys()},
+		{"journeys_stop_hook.go", stopHookJourneys()},
 		{"journeys_sdd_untracked.go", selectedUntrackedSDDJourneys()},
 		{"journeys_capture_evidence_v5.go", captureEvidenceDescriptorJourneys()},
 		{"journeys_scope_changed_fixture.go", scopeChangedFixtureJourneys()},
@@ -56,6 +57,8 @@ func journeySources() []journeySource {
 		{"journeys_managed_assets.go", managedAssetJourneys()},
 		{"journeys_issue2906.go", issue2906Journeys()},
 		{"journeys_issue_2138.go", issue2138Journeys()},
+		{"journeys_issue_3336.go", issue3336Journeys()},
+		{"journeys_issue_3500.go", issue3500Journeys()},
 		{"journeys_issue_3043.go", issue3043Journeys()},
 		{"journeys_issue_3557.go", issue3557Journeys()},
 		{"journeys_issue_3561.go", issue3561Journeys()},
@@ -73,6 +76,7 @@ func journeySources() []journeySource {
 		{"journeys_issue3766.go", issue3766Journeys()},
 		{"journeys_issue3813.go", issue3813Journeys()},
 		{"journeys_issue3842.go", issue3842Journeys()},
+		{"journeys_4040_untracked_inventory.go", untrackedInventoryRecoveryLoopJourneys()},
 	}
 	for index := range sources {
 		sources[index].Journeys = removeRetiredAtomicJourneys(sources[index].Journeys)

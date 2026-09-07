@@ -871,6 +871,15 @@ func (s agentRoutingGuidanceStep) Run() error {
 	if err != nil {
 		return fmt.Errorf("create adapter for %q: %w", s.agent, err)
 	}
+
+	// Pi (and any future agent without a managed system prompt) owns its own
+	// prompt delivery outside gentle-ai, so there is nothing to strip or
+	// inject here: skip the step entirely rather than writing routing
+	// guidance into a file gentle-ai does not own (issue #4063).
+	if !adapter.SupportsSystemPrompt() {
+		return nil
+	}
+
 	targetDir := routingGuidanceDir(s.homeDir, s.workspaceDir, s.scope, adapter)
 
 	// Strip first: an installation upgraded from an older release still carries
@@ -881,7 +890,13 @@ func (s agentRoutingGuidanceStep) Run() error {
 		return err
 	}
 
-	injected, err := agentguidance.InjectRouting(targetDir, s.agent)
+	options := routingGuidanceOptions(s.homeDir, s.workspaceDir, adapter)
+	var injected agentguidance.Result
+	if options.SettingsPath == "" {
+		injected, err = agentguidance.InjectRouting(targetDir, s.agent)
+	} else {
+		injected, err = agentguidance.InjectRoutingWithOptions(targetDir, s.agent, options)
+	}
 	if err != nil {
 		return fmt.Errorf("inject routing guidance for %q: %w", s.agent, err)
 	}
@@ -1469,7 +1484,7 @@ func (s componentApplyStep) Run() error {
 				return fmt.Errorf("install beta engram from main: %w", err)
 			}
 			engramCommand = binaryPath
-		} else if installedPath, err := cmdLookPath("engram"); err != nil {
+		} else if installedPath, found := resolveEngramInstalledPath(s.profile); !found {
 			// Engram not on PATH — install it.
 			if s.profile.PackageManager == "brew" {
 				// macOS (or Linux with Homebrew): use brew tap + brew install.
@@ -1477,7 +1492,13 @@ func (s componentApplyStep) Run() error {
 				if err != nil {
 					return fmt.Errorf("resolve install command for component %q: %w", s.component, err)
 				}
+				commands = withResolvedBrewCommand(commands)
 				installErr = runCommandSequence(commands)
+				if installErr == nil {
+					if installedPath, found := resolveEngramInstalledPath(s.profile); found {
+						engramCommand = installedPath
+					}
+				}
 			} else if binaryPath, err := engramDownloadFn(s.profile); err != nil {
 				// Linux / Windows: download the pre-built binary from GitHub Releases.
 				// No Go required — engram ships pre-built binaries.
@@ -1523,6 +1544,8 @@ func (s componentApplyStep) Run() error {
 				return fmt.Errorf("repair Windows Engram PATH shadowing: refreshed managed Engram at %s, but could not move %s ahead of stale PATH entry %s: %w. Move %s before %s in your user PATH, then rerun install", binaryPath, binDir, installedPath, err, binDir, filepath.Dir(installedPath))
 			}
 			fmt.Fprintf(os.Stderr, "WARNING: multiple engram.exe entries were found on PATH and %s resolved first. Refreshed managed Engram at %s and moved %s ahead of the stale entry in the user PATH.\n", installedPath, binaryPath, binDir)
+		} else {
+			engramCommand = installedPath
 		}
 		setupMode := engram.ParseSetupMode(os.Getenv(engram.SetupModeEnvVar))
 		setupStrict := engram.ParseSetupStrict(os.Getenv(engram.SetupStrictEnvVar))
@@ -1636,6 +1659,9 @@ func (s componentApplyStep) Run() error {
 						return fmt.Errorf("inject persona for %q: %w", adapter.Agent(), err)
 					}
 				}
+				if _, err := sdd.RetirePiSystemPromptBlocks(s.homeDir, adapter); err != nil {
+					return fmt.Errorf("retire stale Pi system prompt blocks: %w", err)
+				}
 				continue
 			}
 			targetDir := componentInjectionDirScoped(s.homeDir, s.workspaceDir, s.scope, adapter)
@@ -1656,6 +1682,7 @@ func (s componentApplyStep) Run() error {
 			targetDir := componentInjectionDirScoped(s.homeDir, s.workspaceDir, s.scope, adapter)
 			opts := sdd.InjectOptions{
 				OpenCodeModelAssignments:    s.selection.ModelAssignments,
+				OpenCodeSettingsPath:        effectiveOpenCodeSettingsPath(s.homeDir, s.workspaceDir, s.scope, adapter),
 				ClaudeModelAssignments:      s.selection.ClaudeModelAssignments,
 				ClaudePhaseAssignments:      s.selection.ClaudePhaseAssignments,
 				KiroModelAssignments:        s.selection.KiroModelAssignments,
@@ -1915,6 +1942,65 @@ func ggaAvailable(profile system.PlatformProfile) bool {
 	return false
 }
 
+func isExecutableFile(path string) bool {
+	info, err := osStat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+func standardHomebrewExecutable(name string) (string, bool) {
+	for _, binDir := range []string{
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/home/linuxbrew/.linuxbrew/bin",
+	} {
+		path := filepath.Join(binDir, name)
+		if isExecutableFile(path) {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+// resolveEngramInstalledPath finds an existing Engram even when the installer's
+// inherited PATH omits a standard Homebrew prefix (#4020).
+func resolveEngramInstalledPath(profile system.PlatformProfile) (string, bool) {
+	if path, err := cmdLookPath("engram"); err == nil {
+		return path, true
+	}
+	if profile.OS == "darwin" || profile.PackageManager == "brew" {
+		return standardHomebrewExecutable("engram")
+	}
+	return "", false
+}
+
+// resolveBrewCommand avoids environment-sensitive shell profile probing. The
+// inherited PATH and Homebrew's documented standard prefixes are sufficient.
+func resolveBrewCommand() string {
+	if path, err := cmdLookPath("brew"); err == nil {
+		return path
+	}
+	if path, found := standardHomebrewExecutable("brew"); found {
+		return path
+	}
+	return "brew"
+}
+
+func withResolvedBrewCommand(commands [][]string) [][]string {
+	brewPath := ""
+	rewritten := make([][]string, len(commands))
+	for i, command := range commands {
+		if len(command) > 0 && command[0] == "brew" {
+			if brewPath == "" {
+				brewPath = resolveBrewCommand()
+			}
+			rewritten[i] = append([]string{brewPath}, command[1:]...)
+			continue
+		}
+		rewritten[i] = command
+	}
+	return rewritten
+}
+
 // runCommandSequence runs each command in the sequence one at a time, stopping on first error.
 func runCommandSequence(commands [][]string) error {
 	return runCommandSequenceWithProgress(commands, nil, "")
@@ -2159,8 +2245,21 @@ func claudeMCPSettingsCleanupPaths(homeDir, workspaceDir string, scope InstallSc
 func routingGuidancePaths(homeDir, workspaceDir string, scope InstallScope, adapters []agents.Adapter) []string {
 	paths := []string{}
 	for _, adapter := range adapters {
+		// Mirrors the same skip agentRoutingGuidanceStep.Run() applies: an
+		// agent without a managed system prompt (Pi) gets no routing guidance
+		// write, so it must not be declared as a backup target either.
+		if !adapter.SupportsSystemPrompt() {
+			continue
+		}
 		targetDir := routingGuidanceDir(homeDir, workspaceDir, scope, adapter)
-		routing, err := agentguidance.RoutingPaths(targetDir, adapter.Agent())
+		options := routingGuidanceOptions(homeDir, workspaceDir, adapter)
+		var routing []string
+		var err error
+		if options.SettingsPath == "" {
+			routing, err = agentguidance.RoutingPaths(targetDir, adapter.Agent())
+		} else {
+			routing, err = agentguidance.RoutingPathsWithOptions(targetDir, adapter.Agent(), options)
+		}
 		if err != nil {
 			// The guidance step resolves the same delivery and fails loudly when
 			// it runs. Declaring a target we could not resolve would only add a
@@ -2225,15 +2324,18 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			}
 		case model.ComponentSDD:
 			// Jinja modular hubs (e.g. Kimi KIMI.md) are appended once below so SDD+Persona
-			// do not duplicate the same system prompt path.
-			if adapter.SupportsSystemPrompt() && adapter.SystemPromptStrategy() != model.StrategyJinjaModules {
+			// do not duplicate the same system prompt path. OpenCode-compatible adapters
+			// write the SDD orchestrator to their settings file instead (#3975).
+			if adapter.SupportsSystemPrompt() &&
+				!sdd.AgentReceivesManagedOpenCodePlugins(adapter.Agent()) &&
+				adapter.SystemPromptStrategy() != model.StrategyJinjaModules {
 				paths = append(paths, adapter.SystemPromptFile(targetDir))
 			}
 			if adapter.SupportsSlashCommands() {
 				paths = append(paths, sdd.SlashCommandPaths(adapter.Agent(), adapter.CommandsDir(targetDir))...)
 			}
 			if adapter.Agent() == model.AgentOpenCode {
-				if p := adapter.SettingsPath(targetDir); p != "" {
+				if p := effectiveOpenCodeSettingsPath(homeDir, workspaceDir, scope, adapter); p != "" {
 					paths = append(paths, p, opencodedefault.OwnershipPath(p))
 				}
 				paths = append(paths, openCodeSDDPluginPaths(adapter, targetDir)...)
@@ -2403,15 +2505,38 @@ func legacyThemeAppliesToAdapter(selection model.Selection, adapter agents.Adapt
 	return !selection.HasComponent(model.ComponentClaudeTheme)
 }
 
+// effectiveOpenCodeSettingsPath selects the one OpenCode settings authority for
+// a component operation. Global sync/install uses the project-over-global
+// resolver; an explicit workspace scope remains workspace-managed.
+func effectiveOpenCodeSettingsPath(homeDir, workspaceDir string, scope InstallScope, adapter agents.Adapter) string {
+	targetDir := componentInjectionDirScoped(homeDir, workspaceDir, scope, adapter)
+	if adapter.Agent() != model.AgentOpenCode || scope == ScopeWorkspace {
+		return adapter.SettingsPath(targetDir)
+	}
+	return opencodeactivation.EffectiveSettingsPath(homeDir, workspaceDir)
+}
+
+// routingGuidanceOptions carries OpenCode's caller-resolved effective settings
+// authority into the routing-guidance adapter. Routing remains global because
+// OpenCode does not load workspace-scoped orchestrator guidance; other agents
+// retain their existing targetDir-derived routing path.
+func routingGuidanceOptions(homeDir, workspaceDir string, adapter agents.Adapter) agentguidance.RoutingOptions {
+	if adapter.Agent() != model.AgentOpenCode {
+		return agentguidance.RoutingOptions{}
+	}
+	return agentguidance.RoutingOptions{
+		SettingsPath: effectiveOpenCodeSettingsPath(homeDir, workspaceDir, ScopeGlobal, adapter),
+	}
+}
+
 func componentInjectionDir(homeDir, workspaceDir string, adapter agents.Adapter) string {
 	return componentInjectionDirScoped(homeDir, workspaceDir, ScopeGlobal, adapter)
 }
 
 // routingGuidanceDir resolves the installation root routing guidance is
-// delivered under. Agents that deliver through the managed orchestrator prompt
-// only ever load the home-level settings document, so a workspace-scoped
-// install must still resolve them against the home directory — a workspace
-// .config tree is a scope those agents never read (issue #1825). Every other
+// delivered under. Orchestrator-prompt adapters retain their home-level adapter
+// root for legacy cleanup and ordinary delivery; OpenCode's effective settings
+// authority is supplied separately through routingGuidanceOptions. Every other
 // agent keeps the ordinary scoped resolution. The guidance step and the backup
 // contract both resolve through here so the snapshot cannot drift from what
 // the injector writes.

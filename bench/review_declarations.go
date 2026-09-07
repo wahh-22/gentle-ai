@@ -55,6 +55,8 @@ var coreJourneyReviewModes = map[string]ReviewPrecondition{
 	"j31-nonsense-mode-value":                                                   reviewUntouched,
 	"j32-recovery-of-a-recovery":                                                reviewOptedIn,
 	"j33-escalate-then-recover":                                                 reviewOptedIn,
+	"j3336-opencode-sdd-fresh-default-preflight":                                reviewUntouched,
+	"j3500-preserved-external-opencode-sync":                                    reviewUntouched,
 	"j34-abandon-then-start-again":                                              reviewOptedIn,
 	"j35-correction-budget-exactly-zero":                                        reviewOptedIn,
 	"j36-contract-right-name-wrong-version":                                     reviewOptedIn,
@@ -122,6 +124,9 @@ var coreJourneyReviewModes = map[string]ReviewPrecondition{
 	"j122-global-review-mode-from-non-git-cwd":                                  reviewUntouched,
 	"j123-rejected-provider-validator-starts-fresh-high-risk-review":            reviewOptedIn,
 	"j124-sdd-attempt-reset-after-selected-untracked-lands":                     reviewOptedIn,
+	"j125-claude-code-stop-hook-reminds-once-per-candidate":                     reviewOptedIn,
+	"j126-selected-untracked-terminal-status-resumes-without-flags":             reviewOptedIn,
+	"j4040-untracked-inventory-recovery-loop":                                   reviewUntouched,
 }
 
 func declareCoreJourneyReviewModes(journeys []Journey) []Journey {

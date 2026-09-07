@@ -24,6 +24,14 @@ type statusEnvelope struct {
 	// journey assertions and must never be used to reconstruct that binding.
 	rawJSON string
 
+	Schema string `json:"schema"`
+	// EligibleUntrackedInventory is issue #4040's fix: the canonical
+	// untracked-inventory digest published unconditionally at the STATUS
+	// top level (design decision 2), distinct from the same digest embedded
+	// inside NextTransition.Collect.Inputs[].Arguments, which only appears
+	// while a selection is still undeclared.
+	EligibleUntrackedInventory string `json:"eligible_untracked_inventory"`
+
 	Authority struct {
 		LineageID string `json:"lineage_id"`
 		State     string `json:"state"`
@@ -65,6 +73,16 @@ type statusEnvelope struct {
 				Token string `json:"token"`
 			} `json:"arguments"`
 		} `json:"execute"`
+		// Continuation is set only on the one stop reason_code
+		// (managed_assets_outdated) whose stop is itself the
+		// candidate-preserving continuation (#3299, #4170): the exact
+		// `gentle-ai sync` invocation that reconciles the recorded digest.
+		Continuation *struct {
+			Operation   string   `json:"operation"`
+			Command     string   `json:"command"`
+			Agent       string   `json:"agent"`
+			StaleAssets []string `json:"stale_assets"`
+		} `json:"continuation"`
 	} `json:"next_transition"`
 }
 
@@ -89,7 +107,15 @@ func (e statusEnvelope) executeArgument(name string) string {
 	return ""
 }
 
+// paths names the frozen candidate paths a reviewer must inspect. The
+// native-git transport no longer inlines the changed-path manifest on every
+// per-lens capture input (#3922); the published projection carries the same
+// path set for the whole lineage, and the legacy manifest remains a fallback
+// for envelopes that still inline it.
 func (e statusEnvelope) paths() []string {
+	if len(e.Projection.Paths) > 0 {
+		return append([]string{}, e.Projection.Paths...)
+	}
 	if len(e.NextTransition.Collect.Inputs) == 0 {
 		return nil
 	}
@@ -814,6 +840,8 @@ func Journeys() []Journey {
 	journeys = append(journeys, managedAssetJourneys()...)
 	journeys = append(journeys, issue2906Journeys()...)
 	journeys = append(journeys, issue2138Journeys()...)
+	journeys = append(journeys, issue3336Journeys()...)
+	journeys = append(journeys, issue3500Journeys()...)
 	journeys = append(journeys, issue3043Journeys()...)
 	journeys = append(journeys, issue3557Journeys()...)
 	journeys = append(journeys, issue3561Journeys()...)
@@ -832,6 +860,8 @@ func Journeys() []Journey {
 	journeys = append(journeys, issue3813Journeys()...)
 	journeys = append(journeys, issue3842Journeys()...)
 	journeys = append(journeys, handoffJourneys()...)
+	journeys = append(journeys, stopHookJourneys()...)
+	journeys = append(journeys, untrackedInventoryRecoveryLoopJourneys()...)
 	journeys = removeRetiredAtomicJourneys(journeys)
 	return declareCoreJourneyReviewModes(journeys)
 }

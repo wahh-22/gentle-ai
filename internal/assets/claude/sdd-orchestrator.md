@@ -85,6 +85,10 @@ These are parent-orchestrator routing boundaries. Use the smallest useful topolo
 5. **Per-action rule**: tests, builds, installs, and native review actors may use fresh workers without changing the implementation route or creating SDD state.
 6. **Optional SDD rule**: propose SDD only when durable proposal/spec/design/tasks materially reduce substantial ambiguity. Select SDD only after an explicit request or accepted proposal; risk alone never forces SDD.
 
+#### Delegated Verification Gate (MANDATORY)
+
+{{GENTLE_AI_SDD_SECTION:Delegated Verification Gate (MANDATORY)}}
+
 #### Native Checking Contract
 
 - Final source-mutating normalization happens before functional verification and candidate freeze.
@@ -110,10 +114,13 @@ The canonical native bounded-review contract is injected from the shared provide
 
 {{GENTLE_AI_RESEARCH_LIFECYCLE}}
 
+<!-- gentle-ai:sdd-model-assignments -->
+<!-- /gentle-ai:sdd-model-assignments -->
+
 ## SDD Workflow (lazy-loaded)
 
 The detailed SDD procedure is intentionally NOT embedded in this always-on parent thread. Before handling any SDD command, meta-command, continuation, apply/verify/archive routing, or SDD/Judgment-Day phase delegation, read:
 
 `.claude/skills/_shared/sdd-orchestrator-workflow.md` under the workspace when a workspace-scope install wrote it there, otherwise `~/.claude/skills/_shared/sdd-orchestrator-workflow.md`
 
-That lazy surface contains the SDD commands, init/dispatcher guards, execution-mode gatekeeper, artifact store policy, delivery strategy, dependency graph, review workload guard, model assignments, sub-agent launch protocol, context protocol, topic keys, and recovery rules.
+That lazy surface contains the SDD commands, init/dispatcher guards, execution-mode gatekeeper, artifact store policy, delivery strategy, dependency graph, review workload guard, sub-agent launch protocol, context protocol, topic keys, and recovery rules.

@@ -425,6 +425,13 @@ func RestorePersistedSelection(selection *model.Selection, persisted state.Insta
 	}
 	setSelectionComponent(selection, model.ComponentPermission, flags.permissionsSet, flags.IncludePermissions)
 	setSelectionComponent(selection, model.ComponentTheme, flags.themeSet, flags.IncludeTheme)
+	// The persisted component list above may predate the caller ever choosing
+	// the SDD component (e.g. an install that ran before profiles existed).
+	// When the caller explicitly asked for profile or model assignment work,
+	// that request must not be silently dropped — see issue #3430.
+	if model.CarriesSDDWork(explicit.Profiles, explicit.ModelAssignments) {
+		selection.EnsureComponent(model.ComponentSDD)
+	}
 }
 
 func setSelectionComponent(selection *model.Selection, component model.ComponentID, configured, included bool) {
@@ -443,32 +450,24 @@ func setSelectionComponent(selection *model.Selection, component model.Component
 	}
 }
 
-// DiscoverAgents returns the agent IDs to sync.
-//
-// Discovery order:
-//  1. Persisted state (~/.gentle-ai/state.json) — written at install time.
-//     When present and non-empty, only the agents the user explicitly installed
-//     are returned. This prevents sync from injecting into every IDE config dir
-//     that happens to exist on the system (issue #107).
-//  2. Filesystem fallback — delegates to agents.DiscoverInstalled with the
-//     default registry. Used when state.json is absent (users who installed
-//     before state persistence was added) or empty.
+// DiscoverAgents returns the agent IDs to sync. Persisted selections are
+// authoritative, including an explicitly configured empty selection. Missing or
+// incidental state falls back to filesystem discovery; unreadable state fails
+// closed so sync cannot inject into unselected agent configuration.
 //
 // When --agents is provided explicitly, callers should pass those IDs directly
 // instead of calling DiscoverAgents.
 func DiscoverAgents(homeDir string) []model.AgentID {
-	// Try reading persisted state first.
-	s, err := state.Read(homeDir)
-	if err == nil && len(s.InstalledAgents) > 0 {
-		ids := make([]model.AgentID, 0, len(s.InstalledAgents))
-		for _, a := range s.InstalledAgents {
-			ids = append(ids, model.AgentID(a))
-		}
-		return ids
+	scope := agents.ReadSelectionScope(homeDir)
+	switch scope.Mode {
+	case agents.SelectionScopeConfigured:
+		return scope.AgentIDs
+	case agents.SelectionScopeUnavailable:
+		return nil
 	}
 
-	// Fallback: filesystem discovery (backward compat for users who installed
-	// before state persistence was added).
+	// Fallback: filesystem discovery for legacy installs and incidental state
+	// written before an installation records a user selection.
 	reg, err := agents.NewDefaultRegistry()
 	if err != nil {
 		// Registry construction only fails if a duplicate adapter is registered,
@@ -651,6 +650,9 @@ func syncBackupTargets(homeDir, workspaceDir string, selection model.Selection, 
 		if component == model.ComponentPersona {
 			plan := persona.ResourcePlanFor(selection.Persona)
 			for _, adapter := range adapters {
+				if adapter.Agent() == model.AgentPi {
+					paths[adapter.SystemPromptFile(homeDir)] = struct{}{}
+				}
 				if adapter.Agent() == model.AgentOpenCode || adapter.Agent() == model.AgentKilocode {
 					// Persona sync can remove stale managed agent state from settings.
 					// This target is backup-only: syncPersonaPaths intentionally does
@@ -1076,7 +1078,7 @@ func (s componentSyncStep) Run() error {
 			settingsPath := ""
 			for _, adapter := range adapters {
 				if adapter.Agent() == model.AgentOpenCode {
-					settingsPath = adapter.SettingsPath(s.homeDir)
+					settingsPath = effectiveOpenCodeSettingsPath(s.homeDir, s.workspaceDir, ScopeGlobal, adapter)
 					break
 				}
 			}
@@ -1102,6 +1104,7 @@ func (s componentSyncStep) Run() error {
 			targetDir := componentInjectionDir(s.homeDir, s.workspaceDir, adapter)
 			opts := sdd.InjectOptions{
 				OpenCodeModelAssignments:           s.selection.ModelAssignments,
+				OpenCodeSettingsPath:               effectiveOpenCodeSettingsPath(s.homeDir, s.workspaceDir, ScopeGlobal, adapter),
 				ClaudeModelAssignments:             s.selection.ClaudeModelAssignments,
 				ClaudePhaseAssignments:             s.selection.ClaudePhaseAssignments,
 				KiroModelAssignments:               s.selection.KiroModelAssignments,
@@ -1197,6 +1200,11 @@ func (s componentSyncStep) Run() error {
 					return fmt.Errorf("sync persona for %q: %w", adapter.Agent(), err)
 				}
 				s.countChanged(boolToInt(res.Changed), res.Files...)
+				retireRes, err := sdd.RetirePiSystemPromptBlocks(s.homeDir, adapter)
+				if err != nil {
+					return fmt.Errorf("retire stale Pi system prompt blocks: %w", err)
+				}
+				s.countChanged(boolToInt(retireRes.Changed), retireRes.Files...)
 				continue
 			}
 			targetDir := componentInjectionDir(s.homeDir, s.workspaceDir, adapter)
@@ -1564,6 +1572,10 @@ func runSyncWithSelection(homeDir string, selection model.Selection, background 
 		persistedPersona = persistedState.Persona
 		applyResolvedPersona(&selection, persistedPersona)
 	}
+	if len(selection.ModelAssignments) == 0 && len(persistedState.ModelAssignments) > 0 {
+		workspaceDir, _ := os.Getwd()
+		selection.ModelAssignments = restoreOpenCodeModelAssignmentsFromState(homeDir, workspaceDir, ScopeGlobal, persistedState, selection.SDDMode)
+	}
 
 	// Migrate a persisted legacy alias BEFORE any early return: a no-agent
 	// no-op sync and a failing pipeline must still leave state.json remapped,
@@ -1801,11 +1813,8 @@ func RunSync(args []string) (SyncResult, error) {
 		selection.KiroModelAssignments = m
 	}
 	if len(selection.ModelAssignments) == 0 && len(persistedState.ModelAssignments) > 0 {
-		m := make(map[string]model.ModelAssignment, len(persistedState.ModelAssignments))
-		for k, v := range persistedState.ModelAssignments {
-			m[k] = model.ModelAssignment{ProviderID: v.ProviderID, ModelID: v.ModelID, Effort: v.Effort}
-		}
-		selection.ModelAssignments = m
+		workspaceDir, _ := os.Getwd()
+		selection.ModelAssignments = restoreOpenCodeModelAssignmentsFromState(homeDir, workspaceDir, ScopeGlobal, persistedState, selection.SDDMode)
 	}
 	if selection.CodexOrchestratorAssignment == nil && persistedState.CodexOrchestratorAssignment != nil {
 		selection.CodexOrchestratorAssignment = codexOrchestratorFromState(persistedState.CodexOrchestratorAssignment)
@@ -1890,6 +1899,42 @@ func RunSync(args []string) (SyncResult, error) {
 	}
 	result.DryRun = false
 	return result, nil
+}
+
+func restoreOpenCodeModelAssignmentsFromState(homeDir, workspaceDir string, scope InstallScope, persistedState state.InstallState, sddMode model.SDDModeID) map[string]model.ModelAssignment {
+	if len(persistedState.ModelAssignments) == 0 {
+		return nil
+	}
+	presence := map[string]opencodeactivation.AssignmentPresence{}
+	settingsPath := effectiveOpenCodeSettingsPath(homeDir, workspaceDir, scope, opencodeagent.NewAdapter())
+	if settingsPath != "" {
+		if _, err := os.Stat(settingsPath); err == nil {
+			snapshot, err := opencodeactivation.ResolveEffectiveConfigForHome(homeDir, filepath.Dir(settingsPath))
+			if err == nil && snapshot.Path == settingsPath {
+				presence = snapshot.Assignments
+			}
+		}
+	}
+
+	assignments := make(map[string]model.ModelAssignment, len(persistedState.ModelAssignments))
+	for k, v := range persistedState.ModelAssignments {
+		if current, exists := presence[k]; exists && current.Present {
+			// Single mode intentionally generates managed agents without model fields,
+			// so their absence is not evidence of a user clear. Multi mode writes
+			// assignments into managed agents, making an absent/empty value explicit.
+			if current.Cleared && !(sddMode == model.SDDModeSingle && current.Managed) {
+				continue
+			}
+			if current.Assignment.ProviderID != "" || current.Assignment.ModelID != "" {
+				continue
+			}
+		}
+		assignments[k] = model.ModelAssignment{ProviderID: v.ProviderID, ModelID: v.ModelID, Effort: v.Effort}
+	}
+	if len(assignments) == 0 {
+		return nil
+	}
+	return assignments
 }
 
 // zeroAgentSyncNoOp reports whether a sync without agents has no compatible
