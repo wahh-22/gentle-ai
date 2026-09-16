@@ -28,6 +28,15 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if runtime.GOOS == "darwin" {
+		canonicalTempDir, err := filepath.EvalSymlinks(os.TempDir())
+		if err != nil {
+			panic(err)
+		}
+		if err := os.Setenv("TMPDIR", canonicalTempDir); err != nil {
+			panic(err)
+		}
+	}
 	testHome, err := os.MkdirTemp("", "gentle-ai-reviewtransaction-test-home-*")
 	if err != nil {
 		panic(err)
