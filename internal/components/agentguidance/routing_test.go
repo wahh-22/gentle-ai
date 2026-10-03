@@ -7,9 +7,9 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/gentleman-programming/gentle-ai/v3/internal/agents/capabilitymanifest"
-	"github.com/gentleman-programming/gentle-ai/v3/internal/catalog"
-	"github.com/gentleman-programming/gentle-ai/v3/internal/model"
+	"github.com/gentleman-programming/gentle-ai/v4/internal/agents/capabilitymanifest"
+	"github.com/gentleman-programming/gentle-ai/v4/internal/catalog"
+	"github.com/gentleman-programming/gentle-ai/v4/internal/model"
 )
 
 func TestRoutingIncludesApplicableTestFirstPolicy(t *testing.T) {
@@ -29,10 +29,11 @@ func TestRoutingIncludesApplicableTestFirstPolicy(t *testing.T) {
 	}
 }
 
-// supportedAgentCount guards the catalog itself: routing is unconditional for
-// every supported adapter, so a silently shrinking catalog must fail here
-// instead of quietly reducing coverage of the table-driven tests below.
-const supportedAgentCount = 16
+// supportedAgentCount guards the catalog itself: routing renders for every
+// supported adapter (including the catalog-only Conductor, which simply never
+// gets written), so a silently shrinking catalog must fail here instead of
+// quietly reducing coverage of the table-driven tests below.
+const supportedAgentCount = 17
 
 // retiredRemoteControlPlaneVocabulary is the wire and ceremony vocabulary the
 // organic routing projection must never carry. Rendering any of these would
@@ -116,8 +117,13 @@ func TestRenderRoutingSucceedsForEverySupportedAgent(t *testing.T) {
 			// The rendered thresholds must come from the canonical manifest, not
 			// from prose invented by the renderer.
 			for _, want := range []string{
-				fmt.Sprintf("%d–%d files", routing.DirectInline.MinUnderstandingFiles, routing.DirectInline.MaxUnderstandingFiles),
-				fmt.Sprintf("%d+ files", routing.DelegatedDirect.MappingMinUnderstandingFiles),
+				fmt.Sprintf("one parallel batch (%d maximum)", routing.DirectInline.MaxEvidenceBatches),
+				fmt.Sprintf("at most %d calls", routing.DirectInline.MaxEvidenceCalls),
+				fmt.Sprintf("approximately %dk tokens", routing.DirectInline.ApproxEvidenceTokens/1000),
+				fmt.Sprintf("more than approximately %d sequential lookups", routing.DelegatedDirect.ApproxSequentialLookupLimit),
+				fmt.Sprintf("at most approximately %dk tokens", routing.DelegatedDirect.ApproxHandoffTokens/1000),
+				fmt.Sprintf("one parent spot check (%d maximum)", routing.DelegatedDirect.MaxParentSpotChecks),
+				fmt.Sprintf("approximately %dk parent-context tokens", routing.DelegatedDirect.ApproxParentContextTokens/1000),
 				fmt.Sprintf("%d+ non-trivial files", routing.DelegatedDirect.WriterMinNonTrivialFiles),
 			} {
 				if !strings.Contains(rendered, want) {
@@ -523,6 +529,13 @@ func TestRenderRoutingObeysTheUserOnReviewMode(t *testing.T) {
 	}
 }
 
+func routingVocabularyForGuard(block, forbidden string) string {
+	if forbidden == "token" {
+		return routingBlockWithoutEvidenceSizes(block)
+	}
+	return block
+}
+
 func TestRenderRoutingOmitsRetiredRemoteControlPlaneVocabulary(t *testing.T) {
 	t.Parallel()
 
@@ -536,7 +549,9 @@ func TestRenderRoutingOmitsRetiredRemoteControlPlaneVocabulary(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RenderRouting(%q) error = %v", agent.ID, err)
 				}
-				if strings.Contains(strings.ToLower(rendered), needle) {
+				// Evidence sizes are not retired remote authorization tokens.
+				checked := routingVocabularyForGuard(rendered, forbidden)
+				if strings.Contains(strings.ToLower(checked), needle) {
 					t.Fatalf("RenderRouting(%q) leaks retired vocabulary %q:\n%s", agent.ID, forbidden, rendered)
 				}
 			}
@@ -689,12 +704,12 @@ func TestRenderRoutingMakesDelegationMandatory(t *testing.T) {
 				"These triggers are mandatory, not advisory",
 				"stop and delegate through the runtime's subagent mechanism",
 				"executing past a fired trigger inline is a routing defect",
-				fmt.Sprintf("**Mapping trigger:** when understanding the work requires %d or more files", routing.DelegatedDirect.MappingMinUnderstandingFiles),
+				"**Mapping trigger:** when evidence exceeds the inline batch budget",
 				fmt.Sprintf("**Writer trigger:** when implementation touches %d or more non-trivial files", routing.DelegatedDirect.WriterMinNonTrivialFiles),
 				"A mechanical second-file edit does not fire this trigger solely because an earlier file was touched; count non-trivial files in the current work",
 				"**Preparation trigger:**",
 				"**Long-session backstop:**",
-				"pause and delegate the next bounded unit of work",
+				"pause and delegate the next bounded unit",
 				"**Route declaration:**",
 				"record the chosen route per task",
 				"so skipped delegation is observable instead of silent",
