@@ -99,9 +99,11 @@ func Detect(ctx context.Context) (DetectionResult, error) {
 
 	result := detectFromInputs(runtime.GOOS, runtime.GOARCH, os.Getenv("SHELL"), osReleaseContent, tools, configs)
 	// On Windows, npm global prefix is user-writable by default (no sudo needed).
+	// A caller that supplies Engram skips the npm prefix probe: NpmWritable
+	// only shapes install advice for npm-based agents that is never executed.
 	if runtime.GOOS == "windows" {
 		result.System.Profile.NpmWritable = true
-	} else {
+	} else if !callerSuppliesEngram() {
 		result.System.Profile.NpmWritable = detectNpmWritable(homeDir)
 	}
 	result.Dependencies = DetectDependencies(ctx, result.System.Profile)
@@ -116,7 +118,7 @@ func detectNpmWritable(homeDir string) bool {
 		return true
 	}
 
-	out, err := exec.Command("npm", "config", "get", "prefix").Output()
+	out, err := runProbe(exec.Command("npm", "config", "get", "prefix"))
 	if err != nil {
 		return false
 	}
